@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from .constants import AUDIO_EXTENSIONS, MEDIA_EXTENSIONS, SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS
+from .constants import AUDIO_EXTENSIONS, DEFAULT_VAD_SPEECH_PAD_MS, MEDIA_EXTENSIONS, SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS
 from .models import VadSettings
 from .vad import detect_speech_segments, load_wave_16k_mono, merge_speech_segments
 
@@ -220,7 +220,11 @@ def _write_wav_clip(output_path: Path, samples: np.ndarray) -> None:
 def split_audio_with_vad(wav_path: Path, vad_settings: VadSettings, temp_dir: Path) -> list[AudioChunk]:
     audio = load_wave_16k_mono(wav_path)
     detected = detect_speech_segments(audio, vad_settings)
-    merged = merge_speech_segments(detected, vad_settings.max_segment_seconds)
+    merged = merge_speech_segments(
+        detected,
+        vad_settings.max_segment_seconds,
+        gap_tolerance_seconds=(vad_settings.speech_pad_ms or DEFAULT_VAD_SPEECH_PAD_MS) / 1000.0,
+    )
     if not merged:
         return [AudioChunk(path=wav_path, start_offset=0.0, end_offset=len(audio) / 16000.0)]
 

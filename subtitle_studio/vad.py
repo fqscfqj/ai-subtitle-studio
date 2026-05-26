@@ -218,15 +218,20 @@ def detect_speech_segments(
     return [VadSegment(start=speech["start"] / 16000.0, end=speech["end"] / 16000.0) for speech in speeches]
 
 
-def merge_speech_segments(segments: List[VadSegment], max_segment_seconds: int) -> List[VadSegment]:
+def merge_speech_segments(
+    segments: List[VadSegment],
+    max_segment_seconds: int,
+    gap_tolerance_seconds: float = DEFAULT_VAD_SPEECH_PAD_MS / 1000.0,
+) -> List[VadSegment]:
     if not segments:
         return []
     merged: List[VadSegment] = []
     current = VadSegment(start=segments[0].start, end=segments[0].end)
     for segment in segments[1:]:
         current_span = segment.end - current.start
-        # Only merge overlapping/contiguous segments; keep silence boundaries intact.
-        should_merge = segment.start <= current.end and current_span <= max_segment_seconds
+        gap = segment.start - current.end
+        # Merge overlapping or near-contiguous segments when the combined span still fits.
+        should_merge = gap <= gap_tolerance_seconds + 1e-6 and current_span <= max_segment_seconds
         if should_merge:
             current.end = segment.end
             continue

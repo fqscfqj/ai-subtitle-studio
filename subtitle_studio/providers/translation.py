@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Event
@@ -9,14 +10,17 @@ from ..http_client import HttpClient
 from ..models import TranslationProvider, TranslationRequest
 from ..utils import extract_chat_text, is_chinese_language, normalize_response, parse_json_array_output
 
+_MISTRAL_IMPORT_ERROR: Exception | None = None
 try:
-    from mistralai import Mistral
-    _MISTRAL_IMPORT_ERROR: Exception | None = None
+    import mistralai.client as mistralai_client
+
+    Mistral = getattr(mistralai_client, "Mistral", None)
+    if Mistral is None:
+        raise AttributeError("mistralai.client.Mistral is unavailable")
 except Exception:
     try:
-        # mistralai>=2 exposes the SDK entrypoint from mistralai.client.
-        from mistralai.client import Mistral
-        _MISTRAL_IMPORT_ERROR = None
+        mistralai_module = importlib.import_module("mistralai")
+        Mistral = getattr(mistralai_module, "Mistral")
     except Exception as exc:
         Mistral = None
         _MISTRAL_IMPORT_ERROR = exc

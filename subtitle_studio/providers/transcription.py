@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 import time
 from pathlib import Path
@@ -17,14 +18,17 @@ from ..models import (
 )
 from ..utils import detect_language_code, extract_segments, extract_text, normalize_response
 
+_MISTRAL_IMPORT_ERROR: Exception | None = None
 try:
-    from mistralai import Mistral
-    _MISTRAL_IMPORT_ERROR: Exception | None = None
+    import mistralai.client as mistralai_client
+
+    Mistral = getattr(mistralai_client, "Mistral", None)
+    if Mistral is None:
+        raise AttributeError("mistralai.client.Mistral is unavailable")
 except Exception:
     try:
-        # mistralai>=2 exposes the SDK entrypoint from mistralai.client.
-        from mistralai.client import Mistral
-        _MISTRAL_IMPORT_ERROR = None
+        mistralai_module = importlib.import_module("mistralai")
+        Mistral = getattr(mistralai_module, "Mistral")
     except Exception as exc:
         Mistral = None
         _MISTRAL_IMPORT_ERROR = exc
