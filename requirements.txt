@@ -3,3 +3,4 @@ mistralai>=1.9.0
 numpy>=1.26.0
 onnxruntime>=1.17.0
 requests>=2.31.0
+imageio-ffmpeg>=0.5.1

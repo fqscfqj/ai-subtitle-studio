@@ -19,6 +19,23 @@ from .models import (
 )
 from .resources import resource_path
 
+try:
+    from imageio_ffmpeg import get_ffmpeg_exe as imageio_ffmpeg_get_ffmpeg_exe
+except Exception:  # pragma: no cover - optional fallback dependency
+    imageio_ffmpeg_get_ffmpeg_exe = None
+
+
+def _find_imageio_ffmpeg() -> str:
+    if imageio_ffmpeg_get_ffmpeg_exe is None:
+        return ""
+    try:
+        candidate = imageio_ffmpeg_get_ffmpeg_exe()
+    except Exception:
+        return ""
+    if candidate and Path(candidate).exists():
+        return candidate
+    return ""
+
 
 def find_ffmpeg() -> str:
     bundled = resource_path("ffmpeg.exe")
@@ -28,7 +45,9 @@ def find_ffmpeg() -> str:
     if custom and Path(custom).exists():
         return custom
     ffmpeg = shutil.which("ffmpeg")
-    return ffmpeg or ""
+    if ffmpeg:
+        return ffmpeg
+    return _find_imageio_ffmpeg()
 
 
 def default_settings() -> AppSettings:

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from subtitle_studio.config import deserialize_settings, has_ffmpeg, serialize_settings
+from subtitle_studio.config import deserialize_settings, find_ffmpeg, has_ffmpeg, serialize_settings
 
 
 class SettingsCompatibilityTests(unittest.TestCase):
@@ -70,6 +71,15 @@ class SettingsCompatibilityTests(unittest.TestCase):
     def test_has_ffmpeg_false_when_runtime_binary_missing(self, mock_find_ffmpeg) -> None:
         self.assertFalse(has_ffmpeg())
         mock_find_ffmpeg.assert_called_once_with()
+
+    @patch("subtitle_studio.config._find_imageio_ffmpeg", return_value="C:/cache/ffmpeg.exe")
+    @patch("subtitle_studio.config.shutil.which", return_value=None)
+    def test_find_ffmpeg_uses_imageio_fallback(self, mock_which, mock_imageio_ffmpeg) -> None:
+        with patch.dict("subtitle_studio.config.os.environ", {}, clear=True):
+            with patch("subtitle_studio.config.resource_path", return_value=Path("C:/missing/ffmpeg.exe")):
+                self.assertEqual("C:/cache/ffmpeg.exe", find_ffmpeg())
+        mock_which.assert_called_once_with("ffmpeg")
+        mock_imageio_ffmpeg.assert_called_once_with()
 
 
 if __name__ == "__main__":

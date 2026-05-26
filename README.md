@@ -37,7 +37,9 @@ assets/                    图标与本地模型资源
 
 - Python `3.10+`
 - Windows（用于构建 EXE）
-- 打包版会自动附带 `ffmpeg`；源码运行如果要处理视频或启用 VAD，仍可通过 `FFMPEG_BINARY` 或系统 `PATH` 提供 `ffmpeg`
+- 打包版会自动附带 `ffmpeg`
+- 源码运行会优先使用打包资源、`FFMPEG_BINARY` 或系统 `PATH` 中的 `ffmpeg`
+- 如果前面都没有，程序会通过 `imageio-ffmpeg` 自动补齐可执行文件；首次使用可能需要联网下载
 - 至少一种可用的 API 凭证：
   - `MISTRAL_API_KEY`
   - `OPENAI_API_KEY`
@@ -124,5 +126,6 @@ pytest
 
 - 默认输出目录为当前目录下的 `subtitles/`
 - 设置页不再提供 `ffmpeg` 路径选择；打包版会自动使用附带的 `ffmpeg.exe`
-- 源码运行时，如果当前目录下没有打包资源，程序仍会回退到环境变量或系统 `PATH` 中的 `ffmpeg`
+- 源码运行时，如果当前目录下没有打包资源，程序会继续回退到环境变量、系统 `PATH`，以及 `imageio-ffmpeg` 提供的可执行文件
+- 若你的环境不能联网，请提前把 `ffmpeg` 放进 `PATH`，或设置 `FFMPEG_BINARY`
 - 项目当前主要面向 Windows 桌面使用场景

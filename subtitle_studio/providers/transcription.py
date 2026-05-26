@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib
 import json
 import time
@@ -179,7 +180,7 @@ _QWEN3ASR_POLL_TIMEOUT = 7200
 class Qwen3ASRProvider(TranscriptionProvider):
     def __init__(self, settings: Qwen3ASRProviderSettings, http_client: Optional[HttpClient] = None) -> None:
         self.settings = settings
-        self.http_client = http_client or HttpClient(timeout_seconds=120)
+        self.http_client = http_client or HttpClient(timeout_seconds=600)
 
     def transcribe(
         self,
@@ -194,7 +195,7 @@ class Qwen3ASRProvider(TranscriptionProvider):
             progress_cb("正在提交 Qwen3 ASR 任务")
 
         audio_path = request.audio_path
-        file_url = str(audio_path.resolve().as_uri())
+        file_url = self._build_data_url(audio_path)
 
         task_id = self._submit_task(file_url, request, cancel_event)
 
@@ -219,6 +220,33 @@ class Qwen3ASRProvider(TranscriptionProvider):
             language=language,
             raw_payload=payload,
         )
+
+    @staticmethod
+    def _build_data_url(audio_path: Path) -> str:
+        mime_map = {
+            ".wav": "audio/wav",
+            ".mp3": "audio/mpeg",
+            ".m4a": "audio/mp4",
+            ".aac": "audio/aac",
+            ".flac": "audio/flac",
+            ".ogg": "audio/ogg",
+            ".opus": "audio/ogg",
+            ".webm": "audio/webm",
+            ".wma": "audio/x-ms-wma",
+            ".avi": "video/avi",
+            ".mkv": "video/x-matroska",
+            ".mov": "video/quicktime",
+            ".mp4": "video/mp4",
+            ".flv": "video/x-flv",
+            ".mpeg": "video/mpeg",
+            ".amr": "audio/amr",
+            ".aiff": "audio/aiff",
+        }
+        suffix = audio_path.suffix.lower()
+        mime_type = mime_map.get(suffix, "application/octet-stream")
+        audio_bytes = audio_path.read_bytes()
+        b64 = base64.b64encode(audio_bytes).decode("ascii")
+        return f"data:{mime_type};base64,{b64}"
 
     def _submit_task(
         self,
