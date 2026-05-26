@@ -32,6 +32,18 @@ class HttpClient:
         )
         return self._build_response(response)
 
+    def get_json(
+        self,
+        url: str,
+        headers: Optional[Mapping[str, str]] = None,
+    ) -> HttpResponse:
+        response = self.session.get(
+            url,
+            headers=dict(headers or {}),
+            timeout=self.timeout_seconds,
+        )
+        return self._build_response(response)
+
     def post_multipart(
         self,
         url: str,

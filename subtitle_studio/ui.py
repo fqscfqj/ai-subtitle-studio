@@ -278,6 +278,7 @@ class MainWindow(QMainWindow):
         self.transcription_provider_combo = NoWheelComboBox()
         self.transcription_provider_combo.addItem("Mistral", "mistral")
         self.transcription_provider_combo.addItem("Whisper(OpenAI 兼容)", "whisper_openai_compatible")
+        self.transcription_provider_combo.addItem("Qwen3 ASR（DashScope）", "qwen3asr")
         self.transcription_provider_combo.currentIndexChanged.connect(self.on_transcription_provider_changed)
 
         self.mistral_api_key_input = QLineEdit(os.environ.get("MISTRAL_API_KEY", ""))
@@ -315,6 +316,27 @@ class MainWindow(QMainWindow):
         whisper_key_layout.addWidget(self.whisper_api_key_input)
         whisper_key_layout.addWidget(self.show_whisper_key_checkbox)
 
+        self.qwen3asr_api_key_input = QLineEdit(os.environ.get("DASHSCOPE_API_KEY", ""))
+        self.qwen3asr_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.show_qwen3asr_key_checkbox = QCheckBox("显示")
+        self.show_qwen3asr_key_checkbox.toggled.connect(
+            lambda checked: self.qwen3asr_api_key_input.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+        )
+        self.qwen3asr_key_row = QWidget()
+        qwen3asr_key_layout = QHBoxLayout(self.qwen3asr_key_row)
+        qwen3asr_key_layout.setContentsMargins(0, 0, 0, 0)
+        qwen3asr_key_layout.addWidget(self.qwen3asr_api_key_input)
+        qwen3asr_key_layout.addWidget(self.show_qwen3asr_key_checkbox)
+
+        self.qwen3asr_model_combo = NoWheelComboBox()
+        self.qwen3asr_model_combo.setEditable(True)
+        self.qwen3asr_model_combo.addItems([
+            "qwen3-asr-flash-filetrans",
+            "qwen3-asr-flash-filetrans-2025-11-17",
+        ])
+
         self.language_mode_combo = NoWheelComboBox()
         self.language_mode_combo.addItems(["自动识别", "指定语言"])
         self.language_mode_combo.currentIndexChanged.connect(self.on_language_mode_changed)
@@ -336,6 +358,8 @@ class MainWindow(QMainWindow):
         self.whisper_base_url_label = QLabel("Whisper Base URL")
         self.whisper_api_key_label = QLabel("Whisper API Key")
         self.whisper_model_label = QLabel("Whisper 模型")
+        self.qwen3asr_api_key_label = QLabel("DashScope API Key")
+        self.qwen3asr_model_label = QLabel("Qwen3 ASR 模型")
         self.language_mode_label = QLabel("语言模式")
         self.language_label = QLabel("指定语言")
         self.timestamp_label = QLabel("时间戳粒度")
@@ -354,17 +378,21 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.whisper_key_row, 4, 1)
         layout.addWidget(self.whisper_model_label, 5, 0)
         layout.addWidget(self.whisper_model_input, 5, 1)
-        layout.addWidget(self.language_mode_label, 6, 0)
-        layout.addWidget(self.language_mode_combo, 6, 1)
-        layout.addWidget(self.language_label, 7, 0)
-        layout.addWidget(self.language_input, 7, 1)
-        layout.addWidget(self.timestamp_label, 8, 0)
-        layout.addWidget(self.timestamp_combo, 8, 1)
-        layout.addWidget(self.thread_label, 9, 0)
-        layout.addWidget(self.thread_spin, 9, 1)
-        layout.addWidget(self.context_bias_label, 10, 0)
-        layout.addWidget(self.context_bias_input, 10, 1)
-        layout.addWidget(self.diarize_checkbox, 11, 0, 1, 2)
+        layout.addWidget(self.qwen3asr_api_key_label, 6, 0)
+        layout.addWidget(self.qwen3asr_key_row, 6, 1)
+        layout.addWidget(self.qwen3asr_model_label, 7, 0)
+        layout.addWidget(self.qwen3asr_model_combo, 7, 1)
+        layout.addWidget(self.language_mode_label, 8, 0)
+        layout.addWidget(self.language_mode_combo, 8, 1)
+        layout.addWidget(self.language_label, 9, 0)
+        layout.addWidget(self.language_input, 9, 1)
+        layout.addWidget(self.timestamp_label, 10, 0)
+        layout.addWidget(self.timestamp_combo, 10, 1)
+        layout.addWidget(self.thread_label, 11, 0)
+        layout.addWidget(self.thread_spin, 11, 1)
+        layout.addWidget(self.context_bias_label, 12, 0)
+        layout.addWidget(self.context_bias_input, 12, 1)
+        layout.addWidget(self.diarize_checkbox, 13, 0, 1, 2)
 
         self.transcription_mistral_key_widgets = [
             self.mistral_api_key_label,
@@ -382,6 +410,12 @@ class MainWindow(QMainWindow):
             self.whisper_key_row,
             self.whisper_model_label,
             self.whisper_model_input,
+        ]
+        self.transcription_qwen3asr_widgets = [
+            self.qwen3asr_api_key_label,
+            self.qwen3asr_key_row,
+            self.qwen3asr_model_label,
+            self.qwen3asr_model_combo,
         ]
         return group
 
@@ -771,15 +805,18 @@ class MainWindow(QMainWindow):
         self.refresh_settings_visibility()
 
     def apply_settings_to_ui(self, settings: AppSettings) -> None:
-        self.transcription_provider_combo.setCurrentIndex(
-            1 if settings.transcription.provider == "whisper_openai_compatible" else 0
+        provider_index = {"mistral": 0, "whisper_openai_compatible": 1, "qwen3asr": 2}.get(
+            settings.transcription.provider, 0
         )
+        self.transcription_provider_combo.setCurrentIndex(provider_index)
         self.mistral_api_key_input.setText(settings.transcription.mistral.api_key)
         self.translation_mistral_api_key_input.setText(settings.transcription.mistral.api_key)
         self.mistral_model_combo.setCurrentText(settings.transcription.mistral.model)
         self.whisper_base_url_input.setText(settings.transcription.whisper.base_url)
         self.whisper_api_key_input.setText(settings.transcription.whisper.api_key)
         self.whisper_model_input.setText(settings.transcription.whisper.model)
+        self.qwen3asr_api_key_input.setText(settings.transcription.qwen3asr.api_key)
+        self.qwen3asr_model_combo.setCurrentText(settings.transcription.qwen3asr.model)
         self.language_mode_combo.setCurrentIndex(1 if settings.transcription.language_mode == "manual" else 0)
         self.language_input.setText(settings.transcription.language)
         self.timestamp_combo.setCurrentText(settings.transcription.timestamp_granularity)
@@ -818,6 +855,8 @@ class MainWindow(QMainWindow):
         settings.transcription.whisper.base_url = self.whisper_base_url_input.text().strip() or "https://api.openai.com/v1"
         settings.transcription.whisper.api_key = self.whisper_api_key_input.text().strip()
         settings.transcription.whisper.model = self.whisper_model_input.text().strip() or "whisper-1"
+        settings.transcription.qwen3asr.api_key = self.qwen3asr_api_key_input.text().strip()
+        settings.transcription.qwen3asr.model = self.qwen3asr_model_combo.currentText().strip() or "qwen3-asr-flash-filetrans"
         settings.transcription.language_mode = "manual" if self.language_mode_combo.currentIndex() == 1 else "auto"
         settings.transcription.language = normalize_language_code(self.language_input.text().strip())
         settings.transcription.timestamp_granularity = self.timestamp_combo.currentText().strip() or "none"
@@ -864,11 +903,13 @@ class MainWindow(QMainWindow):
         translation_mode = self.translation_mode_combo.currentData()
         use_mistral = provider == "mistral"
         use_whisper = provider == "whisper_openai_compatible"
+        use_qwen3asr = provider == "qwen3asr"
         show_mistral_key = use_mistral or translation_mode == "mistral"
 
         self._set_widgets_visible(self.transcription_mistral_key_widgets, show_mistral_key)
         self._set_widgets_visible(self.transcription_mistral_only_widgets, use_mistral)
         self._set_widgets_visible(self.transcription_whisper_widgets, use_whisper)
+        self._set_widgets_visible(self.transcription_qwen3asr_widgets, use_qwen3asr)
 
         self.mistral_api_key_input.setEnabled(show_mistral_key)
         self.show_mistral_key_checkbox.setEnabled(show_mistral_key)
@@ -877,6 +918,9 @@ class MainWindow(QMainWindow):
         self.whisper_api_key_input.setEnabled(use_whisper)
         self.show_whisper_key_checkbox.setEnabled(use_whisper)
         self.whisper_model_input.setEnabled(use_whisper)
+        self.qwen3asr_api_key_input.setEnabled(use_qwen3asr)
+        self.show_qwen3asr_key_checkbox.setEnabled(use_qwen3asr)
+        self.qwen3asr_model_combo.setEnabled(use_qwen3asr)
         self.diarize_checkbox.setEnabled(use_mistral)
         if not use_mistral:
             self.diarize_checkbox.setChecked(False)
