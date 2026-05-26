@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import importlib
 import json
-import time
 from pathlib import Path
 from threading import Event
 from typing import Any, Callable, Dict, Optional
@@ -170,17 +169,25 @@ class WhisperOpenAICompatibleProvider(TranscriptionProvider):
         }.get(suffix, "application/octet-stream")
 
 
-_DASHSCOPE_SUBMIT_URL = "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription"
-_DASHSCOPE_TASK_URL = "https://dashscope.aliyuncs.com/api/v1/tasks"
-_QWEN3ASR_POLL_INITIAL_DELAY = 3.0
-_QWEN3ASR_POLL_MAX_DELAY = 10.0
-_QWEN3ASR_POLL_TIMEOUT = 7200
+_DASHSCOPE_OPENAI_COMPAT_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+
+_MIME_MAP = {
+    ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
+    ".aac": "audio/aac", ".flac": "audio/flac", ".ogg": "audio/ogg",
+    ".opus": "audio/ogg", ".webm": "audio/webm", ".wma": "audio/x-ms-wma",
+    ".avi": "video/avi", ".mkv": "video/x-matroska", ".mov": "video/quicktime",
+    ".mp4": "video/mp4", ".flv": "video/x-flv", ".mpeg": "video/mpeg",
+    ".amr": "audio/amr", ".aiff": "audio/aiff",
+}
 
 
 class Qwen3ASRProvider(TranscriptionProvider):
     def __init__(self, settings: Qwen3ASRProviderSettings, http_client: Optional[HttpClient] = None) -> None:
         self.settings = settings
         self.http_client = http_client or HttpClient(timeout_seconds=600)
+        # qwen3-asr-flash-filetrans 不支持 OpenAI 兼容模式，自动修正
+        if "filetrans" in self.settings.model:
+            self.settings.model = "qwen3-asr-flash"
 
     def transcribe(
         self,
@@ -191,29 +198,32 @@ class Qwen3ASRProvider(TranscriptionProvider):
         if cancel_event.is_set():
             raise RuntimeError("转写前已取消")
 
-        if progress_cb:
-            progress_cb("正在提交 Qwen3 ASR 任务")
-
         audio_path = request.audio_path
-        file_url = self._build_data_url(audio_path)
-
-        task_id = self._submit_task(file_url, request, cancel_event)
+        file_size_mb = audio_path.stat().st_size / (1024 * 1024)
+        if file_size_mb > 10:
+            raise RuntimeError(
+                f"Qwen3 ASR (qwen3-asr-flash) 单文件限制 10MB，当前文件 {file_size_mb:.1f}MB。"
+                "请使用 VAD 预切分或将音频上传至公网后用 qwen3-asr-flash-filetrans。"
+            )
 
         if progress_cb:
-            progress_cb("Qwen3 ASR 任务已提交，等待识别完成")
-        result_url = self._poll_task(task_id, progress_cb, cancel_event)
+            progress_cb("正在读取音频文件")
+        suffix = audio_path.suffix.lower()
+        mime_type = _MIME_MAP.get(suffix, "application/octet-stream")
+        audio_bytes = audio_path.read_bytes()
+        b64_data = base64.b64encode(audio_bytes).decode("ascii")
+        data_url = f"data:{mime_type};base64,{b64_data}"
+
+        if progress_cb:
+            progress_cb("正在调用 Qwen3 ASR")
+        payload = self._call_sync_api(data_url, request, cancel_event)
 
         if cancel_event.is_set():
             raise RuntimeError("转写已取消")
 
-        if progress_cb:
-            progress_cb("正在下载 Qwen3 ASR 识别结果")
-        payload = self._download_result(result_url)
-
-        segments = self._extract_segments(payload)
         text = self._extract_text(payload)
+        segments = self._extract_segments(payload)
         language = detect_language_code(payload)
-
         return TranscriptionResult(
             text=text,
             segments=segments,
@@ -221,152 +231,74 @@ class Qwen3ASRProvider(TranscriptionProvider):
             raw_payload=payload,
         )
 
-    @staticmethod
-    def _build_data_url(audio_path: Path) -> str:
-        mime_map = {
-            ".wav": "audio/wav",
-            ".mp3": "audio/mpeg",
-            ".m4a": "audio/mp4",
-            ".aac": "audio/aac",
-            ".flac": "audio/flac",
-            ".ogg": "audio/ogg",
-            ".opus": "audio/ogg",
-            ".webm": "audio/webm",
-            ".wma": "audio/x-ms-wma",
-            ".avi": "video/avi",
-            ".mkv": "video/x-matroska",
-            ".mov": "video/quicktime",
-            ".mp4": "video/mp4",
-            ".flv": "video/x-flv",
-            ".mpeg": "video/mpeg",
-            ".amr": "audio/amr",
-            ".aiff": "audio/aiff",
-        }
-        suffix = audio_path.suffix.lower()
-        mime_type = mime_map.get(suffix, "application/octet-stream")
-        audio_bytes = audio_path.read_bytes()
-        b64 = base64.b64encode(audio_bytes).decode("ascii")
-        return f"data:{mime_type};base64,{b64}"
-
-    def _submit_task(
+    def _call_sync_api(
         self,
-        file_url: str,
+        data_url: str,
         request: TranscriptionRequest,
         cancel_event: Event,
-    ) -> str:
+    ) -> Dict[str, Any]:
+        messages: list[Dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": data_url},
+                    }
+                ],
+            }
+        ]
+
         body: Dict[str, Any] = {
             "model": self.settings.model,
-            "input": {"file_url": file_url},
-            "parameters": {},
+            "messages": messages,
+            "stream": False,
         }
+
+        asr_options: Dict[str, Any] = {}
         if request.language_mode == "manual" and request.language:
-            body["parameters"]["language_hints"] = [request.language]
+            asr_options["language"] = request.language
+        if request.context_bias:
+            asr_options["prompt"] = request.context_bias
+        if asr_options:
+            body["asr_options"] = asr_options
 
         headers = {
             "Authorization": f"Bearer {self.settings.api_key}",
             "Content-Type": "application/json",
-            "X-DashScope-Async": "enable",
         }
 
-        response = self.http_client.post_json(_DASHSCOPE_SUBMIT_URL, body, headers)
+        response = self.http_client.post_json(_DASHSCOPE_OPENAI_COMPAT_URL, body, headers)
         if response.status_code >= 400:
             raise RuntimeError(
-                f"Qwen3 ASR 提交任务失败: HTTP {response.status_code} {response.text[:240]}"
+                f"Qwen3 ASR 接口返回错误: HTTP {response.status_code} {response.text[:240]}"
             )
         payload = response.payload if isinstance(response.payload, dict) else {}
-        task_id = payload.get("output", {}).get("task_id", "")
-        if not task_id:
-            raise RuntimeError(f"Qwen3 ASR 未返回 task_id: {response.text[:240]}")
-        return task_id
 
-    def _poll_task(
-        self,
-        task_id: str,
-        progress_cb: Optional[Callable[[str], None]],
-        cancel_event: Event,
-    ) -> str:
-        headers = {"Authorization": f"Bearer {self.settings.api_key}"}
-        url = f"{_DASHSCOPE_TASK_URL}/{task_id}"
+        choices = payload.get("choices", [])
+        if not choices:
+            raise RuntimeError(f"Qwen3 ASR 返回空结果: {response.text[:240]}")
 
-        delay = _QWEN3ASR_POLL_INITIAL_DELAY
-        elapsed = 0.0
-        while elapsed < _QWEN3ASR_POLL_TIMEOUT:
-            if cancel_event.is_set():
-                raise RuntimeError("转写已取消")
-
-            time.sleep(delay)
-            elapsed += delay
-            delay = min(delay * 1.5, _QWEN3ASR_POLL_MAX_DELAY)
-
-            response = self.http_client.get_json(url, headers)
-            if response.status_code >= 400:
-                raise RuntimeError(
-                    f"Qwen3 ASR 查询任务失败: HTTP {response.status_code} {response.text[:240]}"
-                )
-            payload = response.payload if isinstance(response.payload, dict) else {}
-            status = payload.get("output", {}).get("task_status", "")
-
-            if status == "SUCCEEDED":
-                result_url = payload.get("output", {}).get("result", {}).get("transcription_url", "")
-                if not result_url:
-                    raise RuntimeError(f"Qwen3 ASR 任务成功但未返回结果 URL: {response.text[:240]}")
-                return result_url
-            if status in ("FAILED", "CANCELED", "UNKNOWN"):
-                code = payload.get("output", {}).get("code", "")
-                message = payload.get("output", {}).get("message", "")
-                raise RuntimeError(f"Qwen3 ASR 任务失败: {status} {code} {message}")
-
-            if progress_cb:
-                progress_cb(f"Qwen3 ASR 识别中... ({int(elapsed)}s)")
-
-        raise RuntimeError(f"Qwen3 ASR 任务超时（{_QWEN3ASR_POLL_TIMEOUT}s），task_id={task_id}")
-
-    def _download_result(self, result_url: str) -> Dict[str, Any]:
-        response = self.http_client.get_json(result_url)
-        if response.status_code >= 400:
-            raise RuntimeError(
-                f"Qwen3 ASR 下载结果失败: HTTP {response.status_code} {response.text[:240]}"
-            )
-        if isinstance(response.payload, dict):
-            return response.payload
-        try:
-            return json.loads(response.text)
-        except Exception:
-            return {"text": response.text}
-
-    @staticmethod
-    def _extract_segments(payload: Dict[str, Any]) -> list[Dict[str, Any]]:
-        segments: list[Dict[str, Any]] = []
-        for transcript in payload.get("transcripts", []):
-            for sentence in transcript.get("sentences", []):
-                begin_ms = sentence.get("begin_time", 0)
-                end_ms = sentence.get("end_time", 0)
-                text = sentence.get("text", "")
-                if not text:
-                    continue
-                seg: Dict[str, Any] = {
-                    "start": begin_ms / 1000.0,
-                    "end": end_ms / 1000.0,
-                    "text": text,
-                }
-                if "speaker_id" in sentence:
-                    seg["speaker"] = sentence["speaker_id"]
-                if "emotion" in sentence:
-                    seg["emotion"] = sentence["emotion"]
-                if "language" in sentence:
-                    seg["language"] = sentence["language"]
-                segments.append(seg)
-        return segments
+        return payload
 
     @staticmethod
     def _extract_text(payload: Dict[str, Any]) -> str:
-        parts: list[str] = []
-        for transcript in payload.get("transcripts", []):
-            for sentence in transcript.get("sentences", []):
-                text = sentence.get("text", "")
-                if text:
-                    parts.append(text)
-        return "\n".join(parts)
+        choices = payload.get("choices", [])
+        if not choices:
+            return ""
+        message = choices[0].get("message", {})
+        return message.get("content", "")
+
+    @staticmethod
+    def _extract_segments(payload: Dict[str, Any]) -> list[Dict[str, Any]]:
+        choices = payload.get("choices", [])
+        if not choices:
+            return []
+        message = choices[0].get("message", {})
+        text = message.get("content", "")
+        if not text:
+            return []
+        return [{"start": 0.0, "end": 0.0, "text": text}]
 
 
 def summarize_empty_transcription_response(payload: Dict[str, Any], raw_text: str) -> str:

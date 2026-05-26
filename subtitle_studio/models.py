@@ -30,7 +30,7 @@ class WhisperProviderSettings:
 @dataclass
 class Qwen3ASRProviderSettings:
     api_key: str = ""
-    model: str = "qwen3-asr-flash-filetrans"
+    model: str = "qwen3-asr-flash"
 
 
 @dataclass

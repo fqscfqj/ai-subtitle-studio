@@ -333,8 +333,8 @@ class MainWindow(QMainWindow):
         self.qwen3asr_model_combo = NoWheelComboBox()
         self.qwen3asr_model_combo.setEditable(True)
         self.qwen3asr_model_combo.addItems([
-            "qwen3-asr-flash-filetrans",
-            "qwen3-asr-flash-filetrans-2025-11-17",
+            "qwen3-asr-flash",
+            "qwen3-asr-flash-2026-02-10",
         ])
 
         self.language_mode_combo = NoWheelComboBox()
@@ -883,7 +883,7 @@ class MainWindow(QMainWindow):
         settings.transcription.whisper.api_key = self.whisper_api_key_input.text().strip()
         settings.transcription.whisper.model = self.whisper_model_input.text().strip() or "whisper-1"
         settings.transcription.qwen3asr.api_key = self.qwen3asr_api_key_input.text().strip()
-        settings.transcription.qwen3asr.model = self.qwen3asr_model_combo.currentText().strip() or "qwen3-asr-flash-filetrans"
+        settings.transcription.qwen3asr.model = self.qwen3asr_model_combo.currentText().strip() or "qwen3-asr-flash"
         settings.transcription.language_mode = "manual" if self.language_mode_combo.currentIndex() == 1 else "auto"
         settings.transcription.language = normalize_language_code(self.language_input.text().strip())
         settings.transcription.timestamp_granularity = self.timestamp_combo.currentText().strip() or "none"

@@ -64,7 +64,7 @@ def default_settings() -> AppSettings:
             ),
             qwen3asr=Qwen3ASRProviderSettings(
                 api_key=os.environ.get("DASHSCOPE_API_KEY", ""),
-                model="qwen3-asr-flash-filetrans",
+                model="qwen3-asr-flash",
             ),
         ),
         translation=TranslationSettings(
