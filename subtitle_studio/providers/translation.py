@@ -72,9 +72,10 @@ class OpenAICompatibleChatBackend(ChatCompletionBackend):
             ],
         }
         if thinking_enabled:
+            payload["thinking"] = {"type": "enabled"}
             payload["reasoning_effort"] = reasoning_effort
-            payload["extra_body"] = {"thinking": {"type": "enabled"}}
         else:
+            payload["thinking"] = {"type": "disabled"}
             payload["temperature"] = 0.2
 
         response = self.http_client.post_json(
@@ -114,14 +115,20 @@ class MistralChatBackend(ChatCompletionBackend):
                 details = f"（导入错误：{type(_MISTRAL_IMPORT_ERROR).__name__}: {_MISTRAL_IMPORT_ERROR}）"
             raise RuntimeError(f"缺少依赖：mistralai{details}")
         client = Mistral(api_key=self.api_key)
-        response = client.chat.complete(
-            model=model,
-            messages=[
+        request_kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.2,
-        )
+        }
+        if thinking_enabled:
+            request_kwargs["reasoning_effort"] = reasoning_effort
+        else:
+            request_kwargs["reasoning_effort"] = "none"
+            request_kwargs["temperature"] = 0.2
+
+        response = client.chat.complete(**request_kwargs)
         payload = normalize_response(response)
         content = extract_chat_text(payload)
         if not content:
