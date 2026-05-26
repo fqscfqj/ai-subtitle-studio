@@ -355,4 +355,6 @@ class TaskRunner:
             mistral_api_key=self.settings.transcription.mistral.api_key,
             openai_base_url=self.settings.translation.openai_base_url,
             openai_api_key=self.settings.translation.openai_api_key,
+            thinking_enabled=self.settings.translation.thinking_enabled,
+            reasoning_effort=self.settings.translation.reasoning_effort,
         )

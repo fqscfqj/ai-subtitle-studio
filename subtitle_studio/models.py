@@ -58,6 +58,8 @@ class TranslationSettings:
     keep_original_srt: bool = False
     allow_subtitle_import: bool = True
     subtitle_translation_thread_count: int = 3
+    thinking_enabled: bool = False
+    reasoning_effort: str = "high"
 
 
 @dataclass

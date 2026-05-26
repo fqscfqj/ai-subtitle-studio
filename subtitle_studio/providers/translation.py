@@ -35,7 +35,14 @@ def normalize_chat_completions_url(base_url: str) -> str:
 
 
 class ChatCompletionBackend(Protocol):
-    def complete(self, model: str, system_prompt: str, user_prompt: str) -> str:
+    def complete(
+        self,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        thinking_enabled: bool = False,
+        reasoning_effort: str = "high",
+    ) -> str:
         ...
 
 
@@ -45,17 +52,30 @@ class OpenAICompatibleChatBackend(ChatCompletionBackend):
         self.api_key = api_key
         self.http_client = http_client or HttpClient()
 
-    def complete(self, model: str, system_prompt: str, user_prompt: str) -> str:
+    def complete(
+        self,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        thinking_enabled: bool = False,
+        reasoning_effort: str = "high",
+    ) -> str:
+        payload: dict = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        if thinking_enabled:
+            payload["reasoning_effort"] = reasoning_effort
+            payload["extra_body"] = {"thinking": {"type": "enabled"}}
+        else:
+            payload["temperature"] = 0.2
+
         response = self.http_client.post_json(
             normalize_chat_completions_url(self.base_url),
-            payload={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.2,
-            },
+            payload=payload,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
@@ -76,7 +96,14 @@ class MistralChatBackend(ChatCompletionBackend):
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
 
-    def complete(self, model: str, system_prompt: str, user_prompt: str) -> str:
+    def complete(
+        self,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        thinking_enabled: bool = False,
+        reasoning_effort: str = "high",
+    ) -> str:
         if Mistral is None:
             details = ""
             if _MISTRAL_IMPORT_ERROR is not None:
@@ -99,8 +126,15 @@ class MistralChatBackend(ChatCompletionBackend):
 
 
 class StructuredSubtitleTranslationProvider(TranslationProvider):
-    def __init__(self, backend: ChatCompletionBackend) -> None:
+    def __init__(
+        self,
+        backend: ChatCompletionBackend,
+        thinking_enabled: bool = False,
+        reasoning_effort: str = "high",
+    ) -> None:
         self.backend = backend
+        self.thinking_enabled = thinking_enabled
+        self.reasoning_effort = reasoning_effort
 
     def translate_lines(
         self,
@@ -144,7 +178,11 @@ class StructuredSubtitleTranslationProvider(TranslationProvider):
                     "禁止代码块、禁止解释、禁止额外字段。"
                     f"\n输入：{json.dumps([line], ensure_ascii=False)}"
                 )
-                content = self.backend.complete(request.model, system_prompt, user_prompt)
+                content = self.backend.complete(
+                    request.model, system_prompt, user_prompt,
+                    thinking_enabled=self.thinking_enabled,
+                    reasoning_effort=self.reasoning_effort,
+                )
                 last_content = content
                 try:
                     parsed = parse_json_array_output(content)
@@ -183,7 +221,11 @@ class StructuredSubtitleTranslationProvider(TranslationProvider):
                         f"\n输入：{json.dumps(chunk, ensure_ascii=False)}"
                         f"\n上一次输出：{last_content[:800]}"
                     )
-                content = self.backend.complete(request.model, system_prompt, user_prompt)
+                content = self.backend.complete(
+                    request.model, system_prompt, user_prompt,
+                    thinking_enabled=self.thinking_enabled,
+                    reasoning_effort=self.reasoning_effort,
+                )
                 last_content = content
                 try:
                     translated = parse_json_array_output(content)
@@ -228,14 +270,22 @@ def build_translation_provider(
     mistral_api_key: str,
     openai_base_url: str,
     openai_api_key: str,
+    thinking_enabled: bool = False,
+    reasoning_effort: str = "high",
 ) -> TranslationProvider | None:
     if mode == "none":
         return None
     if mode == "mistral":
-        return StructuredSubtitleTranslationProvider(MistralChatBackend(mistral_api_key))
+        return StructuredSubtitleTranslationProvider(
+            MistralChatBackend(mistral_api_key),
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
+        )
     if mode == "openai":
         return StructuredSubtitleTranslationProvider(
-            OpenAICompatibleChatBackend(openai_base_url, openai_api_key)
+            OpenAICompatibleChatBackend(openai_base_url, openai_api_key),
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
         )
     raise RuntimeError("未知翻译模式")
 

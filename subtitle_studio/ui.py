@@ -440,6 +440,25 @@ class MainWindow(QMainWindow):
         self.subtitle_translation_thread_spin.setRange(1, 16)
         self.subtitle_translation_thread_spin.setValue(3)
 
+        self.translation_thinking_checkbox = QCheckBox("启用思考模式（Reasoning）")
+        self.translation_thinking_checkbox.setToolTip(
+            "开启后将使用模型的深度思考能力，可能提升翻译质量但会增加延迟和消耗。\n"
+            "支持 DeepSeek、OpenAI 等兼容 reasoning_effort 的模型。\n"
+            "思考模式下 temperature 参数将被忽略。"
+        )
+        self.translation_reasoning_effort_combo = NoWheelComboBox()
+        self.translation_reasoning_effort_combo.addItem("low", "low")
+        self.translation_reasoning_effort_combo.addItem("medium", "medium")
+        self.translation_reasoning_effort_combo.addItem("high", "high")
+        self.translation_reasoning_effort_combo.addItem("max", "max")
+        self.translation_reasoning_effort_combo.setCurrentText("high")
+        self.translation_reasoning_effort_combo.setToolTip(
+            "思考强度：low / medium / high / max\n"
+            "越高质量越好但延迟和消耗越大。\n"
+            "DeepSeek 模型下 low/medium 会映射为 high。"
+        )
+        self.translation_reasoning_effort_label = QLabel("思考强度")
+
         self.translation_mistral_api_key_input = QLineEdit(os.environ.get("MISTRAL_API_KEY", ""))
         self.translation_mistral_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.translation_mistral_api_key_input.textChanged.connect(self.on_translation_mistral_key_changed)
@@ -489,12 +508,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.allow_subtitle_import_checkbox, 5, 0, 1, 2)
         layout.addWidget(self.subtitle_translation_thread_label, 6, 0)
         layout.addWidget(self.subtitle_translation_thread_spin, 6, 1)
-        layout.addWidget(self.translation_mistral_api_key_label, 7, 0)
-        layout.addWidget(self.translation_mistral_key_row, 7, 1)
-        layout.addWidget(self.translation_openai_base_label, 8, 0)
-        layout.addWidget(self.translation_openai_base_input, 8, 1)
-        layout.addWidget(self.translation_openai_key_label, 9, 0)
-        layout.addWidget(self.translation_openai_key_row, 9, 1)
+        layout.addWidget(self.translation_thinking_checkbox, 7, 0, 1, 2)
+        layout.addWidget(self.translation_reasoning_effort_label, 8, 0)
+        layout.addWidget(self.translation_reasoning_effort_combo, 8, 1)
+        layout.addWidget(self.translation_mistral_api_key_label, 9, 0)
+        layout.addWidget(self.translation_mistral_key_row, 9, 1)
+        layout.addWidget(self.translation_openai_base_label, 10, 0)
+        layout.addWidget(self.translation_openai_base_input, 10, 1)
+        layout.addWidget(self.translation_openai_key_label, 11, 0)
+        layout.addWidget(self.translation_openai_key_row, 11, 1)
 
         self.translation_common_widgets = [
             self.translation_target_label,
@@ -506,6 +528,9 @@ class MainWindow(QMainWindow):
             self.allow_subtitle_import_checkbox,
             self.subtitle_translation_thread_label,
             self.subtitle_translation_thread_spin,
+            self.translation_thinking_checkbox,
+            self.translation_reasoning_effort_label,
+            self.translation_reasoning_effort_combo,
         ]
         self.translation_mistral_widgets = [
             self.translation_mistral_api_key_label,
@@ -833,6 +858,8 @@ class MainWindow(QMainWindow):
         self.subtitle_translation_thread_spin.setValue(settings.translation.subtitle_translation_thread_count)
         self.translation_openai_base_input.setText(settings.translation.openai_base_url)
         self.translation_openai_key_input.setText(settings.translation.openai_api_key)
+        self.translation_thinking_checkbox.setChecked(settings.translation.thinking_enabled)
+        self.translation_reasoning_effort_combo.setCurrentText(settings.translation.reasoning_effort)
 
         self.output_mode_combo.setCurrentIndex(1 if settings.output.mode == "custom" else 0)
         self.output_dir_input.setText(str(settings.output.output_dir))
@@ -873,6 +900,8 @@ class MainWindow(QMainWindow):
         settings.translation.subtitle_translation_thread_count = self.subtitle_translation_thread_spin.value()
         settings.translation.openai_base_url = self.translation_openai_base_input.text().strip() or "https://api.openai.com/v1"
         settings.translation.openai_api_key = self.translation_openai_key_input.text().strip()
+        settings.translation.thinking_enabled = self.translation_thinking_checkbox.isChecked()
+        settings.translation.reasoning_effort = self.translation_reasoning_effort_combo.currentData() or "high"
 
         settings.output.mode = self.output_mode_combo.currentData()
         settings.output.output_dir = Path(self.output_dir_input.text().strip() or str(Path.cwd() / "subtitles"))
@@ -942,6 +971,9 @@ class MainWindow(QMainWindow):
         self.translation_keep_original_checkbox.setEnabled(enable_translation)
         self.allow_subtitle_import_checkbox.setEnabled(enable_translation)
         self.subtitle_translation_thread_spin.setEnabled(enable_translation)
+        self.translation_thinking_checkbox.setEnabled(enable_translation)
+        self.translation_reasoning_effort_combo.setEnabled(enable_translation)
+        self.translation_reasoning_effort_label.setEnabled(enable_translation)
         self.translation_mistral_api_key_input.setEnabled(use_mistral)
         self.show_translation_mistral_key_checkbox.setEnabled(use_mistral)
         self.translation_openai_base_input.setEnabled(use_openai)

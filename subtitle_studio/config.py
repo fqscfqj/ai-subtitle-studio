@@ -131,6 +131,8 @@ def serialize_settings(settings: AppSettings) -> Dict[str, Any]:
         "subtitle_translation_thread_count": settings.translation.subtitle_translation_thread_count,
         "translation_openai_base": settings.translation.openai_base_url,
         "translation_openai_key": settings.translation.openai_api_key,
+        "translation_thinking_enabled": settings.translation.thinking_enabled,
+        "translation_reasoning_effort": settings.translation.reasoning_effort,
         "output_mode": settings.output.mode,
         "output_dir": str(settings.output.output_dir),
         "save_srt": settings.output.save_srt,
@@ -231,6 +233,14 @@ def deserialize_settings(data: Dict[str, Any]) -> AppSettings:
     settings.translation.openai_api_key = _safe_str(
         data.get("translation_openai_key"),
         settings.translation.openai_api_key,
+    )
+    settings.translation.thinking_enabled = _safe_bool(
+        data.get("translation_thinking_enabled"),
+        settings.translation.thinking_enabled,
+    )
+    settings.translation.reasoning_effort = _safe_str(
+        data.get("translation_reasoning_effort"),
+        settings.translation.reasoning_effort,
     )
 
     settings.output.mode = _safe_str(
