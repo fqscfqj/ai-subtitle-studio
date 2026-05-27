@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import os
 import sys
-import threading
-import traceback
-from concurrent.futures import ThreadPoolExecutor
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QFont, QWheelEvent
+from PySide6.QtCore import QEvent, QModelIndex, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QFont, QKeySequence, QShortcut, QWheelEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -23,6 +22,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -45,51 +46,22 @@ from .constants import (
     DEFAULT_VAD_SPEECH_PAD_MS,
     DEFAULT_VAD_THRESHOLD,
     MEDIA_EXTENSIONS,
+    STATUS_COLORS,
     STATUS_LABELS,
     SUBTITLE_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
     VIDEO_EXTENSIONS,
 )
 from .media import discover_supported_files
-from .models import AppSettings, TaskCancelled, TaskState
-from .orchestrator import TaskRunner
+from .models import AppSettings, TaskState
 from .providers import transcription as transcription_provider
-from .utils import new_task_id, normalize_language_code, parse_context_bias
+from .queue_manager import TaskQueueManager
+from .utils import normalize_language_code, normalize_path_key, parse_context_bias
 
 
-class WorkerSignals(QObject):
-    progress = Signal(str, str, int, str)
-    finished = Signal(str, bool, str, str, dict)
-
-
-class DropFrame(QFrame):
-    files_dropped = Signal(list)
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setAcceptDrops(True)
-        self.setObjectName("dropFrame")
-        layout = QVBoxLayout(self)
-        label = QLabel("将视频/音频/字幕文件或文件夹拖拽到这里")
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(label)
-
-    def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event) -> None:  # noqa: N802
-        paths: List[str] = []
-        for url in event.mimeData().urls():
-            local = url.toLocalFile()
-            if local:
-                paths.append(local)
-        if paths:
-            self.files_dropped.emit(paths)
-        event.acceptProposedAction()
-
+# ──────────────────────────────────────────────────────────────
+#  自定义控件
+# ──────────────────────────────────────────────────────────────
 
 class NoWheelComboBox(QComboBox):
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
@@ -106,26 +78,138 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
         event.ignore()
 
 
-def run_task_worker(
-    task_id: str,
-    source_path: Path,
-    settings: AppSettings,
-    signals: WorkerSignals,
-    cancel_event: threading.Event,
-) -> None:
-    runner = TaskRunner(settings)
+class CollapsibleGroupBox(QWidget):
+    """可折叠的分组容器，带 ▶/▼ 箭头动画。"""
 
-    def report(status: str, progress: int, message: str) -> None:
-        signals.progress.emit(task_id, status, progress, message)
+    def __init__(self, title: str, parent: Optional[QWidget] = None, collapsed: bool = False) -> None:
+        super().__init__(parent)
+        self._collapsed = collapsed
 
-    try:
-        outputs = runner.run_task(source_path, report, cancel_event)
-        signals.finished.emit(task_id, True, "Completed", "完成", outputs)
-    except TaskCancelled as exc:
-        signals.finished.emit(task_id, False, "Cancelled", str(exc), {})
-    except Exception as exc:
-        message = str(exc).strip() or traceback.format_exc(limit=1)
-        signals.finished.emit(task_id, False, "Failed", message, {})
+        self._header = QPushButton(f"  ▼  {title}" if not collapsed else f"  ▶  {title}")
+        self._header.setObjectName("collapsibleHeader")
+        self._header.setCheckable(True)
+        self._header.setChecked(not collapsed)
+        self._header.setStyleSheet(
+            "QPushButton#collapsibleHeader { text-align: left; font-weight: 700; font-size: 13px; "
+            "padding: 8px 12px; background: #dce6f2; border: 1px solid #b8c7d9; border-radius: 8px; "
+            "color: #1a2a3a; }"
+            "QPushButton#collapsibleHeader:hover { background: #d0ddef; }"
+        )
+        self._header.clicked.connect(self._toggle)
+
+        self._content = QWidget()
+        self._content_layout = QVBoxLayout(self._content)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(0)
+        self._content.setVisible(not collapsed)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self._header)
+        layout.addWidget(self._content)
+
+    def content_layout(self) -> QVBoxLayout:
+        return self._content_layout
+
+    def add_widget(self, widget: QWidget) -> None:
+        self._content_layout.addWidget(widget)
+
+    def _toggle(self) -> None:
+        self._collapsed = not self._collapsed
+        self._content.setVisible(not self._collapsed)
+        text = self._header.text()
+        if self._collapsed:
+            self._header.setText(text.replace("▼", "▶"))
+        else:
+            self._header.setText(text.replace("▶", "▼"))
+
+
+class DropFrame(QFrame):
+    """拖拽区域，支持 hover 高亮。"""
+    files_dropped = Signal(list)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setAcceptDrops(True)
+        self.setObjectName("dropFrame")
+        layout = QVBoxLayout(self)
+        self._label = QLabel("＋  将视频/音频/字幕文件或文件夹拖拽到这里")
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setStyleSheet("color: #4f83c2; font-size: 14px; font-weight: 600;")
+        layout.addWidget(self._label)
+        self._base_style = self.styleSheet()
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self._set_hover(True)
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self._set_hover(False)
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        self._set_hover(False)
+        paths: List[str] = []
+        for url in event.mimeData().urls():
+            local = url.toLocalFile()
+            if local:
+                paths.append(local)
+        if paths:
+            self.files_dropped.emit(paths)
+        event.acceptProposedAction()
+
+    def _set_hover(self, hover: bool) -> None:
+        if hover:
+            self._label.setStyleSheet("color: #1e5ba8; font-size: 14px; font-weight: 700;")
+            self.setStyleSheet(
+                "#dropFrame { border: 2px solid #2e78c7; border-radius: 10px; "
+                "background: #dce8f6; min-height: 84px; }"
+            )
+        else:
+            self._label.setStyleSheet("color: #4f83c2; font-size: 14px; font-weight: 600;")
+            self.setStyleSheet("")
+
+
+class TaskTableWidget(QTableWidget):
+    """支持右键菜单和拖拽排序的任务表格。"""
+    reorder_requested = Signal()  # 拖拽排序完成信号
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(0, 6, parent)
+        self.setHorizontalHeaderLabels(["来源文件", "状态", "进度", "耗时", "输出文件", "消息"])
+        header = self.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.verticalHeader().setVisible(False)
+        self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.setAlternatingRowColors(True)
+        self.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.setDragDropMode(QTableWidget.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDragDropOverwriteMode(False)
+        self.setVerticalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
+        self.verticalHeader().setDefaultSectionSize(34)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        # 由 MainWindow 注入菜单，这里仅转发
+        menu = QMenu(self)
+        # 获取父级 MainWindow
+        mw = self.window()
+        if hasattr(mw, "_build_context_menu"):
+            mw._build_context_menu(menu)
+        if menu.actions():
+            menu.exec(event.globalPos())
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        super().dropEvent(event)
+        self.reorder_requested.emit()
 
 
 class MainWindow(QMainWindow):
@@ -134,19 +218,23 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Subtitle Studio 字幕工作台")
         self.resize(1280, 860)
 
-        self.signals = WorkerSignals()
-        self.signals.progress.connect(self.on_task_progress)
-        self.signals.finished.connect(self.on_task_finished)
+        # ── 队列管理器 ──
+        self.qm = TaskQueueManager(self)
+        self.qm.task_progress.connect(self.on_task_progress)
+        self.qm.task_finished.connect(self.on_task_finished)
+        self.qm.batch_finished.connect(self.on_batch_finished)
 
-        self.executor: Optional[ThreadPoolExecutor] = None
-        self.cancel_event = threading.Event()
-        self.tasks: Dict[str, TaskState] = {}
-        self.path_to_task: Dict[str, str] = {}
-        self.active_run_ids: set[str] = set()
-        self.completed_run_ids: set[str] = set()
-        self.run_progress: Dict[str, int] = {}
-        self.futures: Dict[str, Any] = {}
-        self.is_running = False
+        # ── 进度刷新定时器 ──
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setInterval(120)
+        self._flush_timer.timeout.connect(self.qm.flush_pending_progress)
+
+        # ── 耗时刷新定时器 ──
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(1000)
+        self._elapsed_timer.timeout.connect(self._update_elapsed_times)
+
+        # ── API Key 同步标志 ──
         self._syncing_mistral_api_key = False
 
         self.init_ui()
@@ -166,69 +254,98 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(root)
 
+        # ── 键盘快捷键 ──
+        QShortcut(QKeySequence("Delete"), self, self.on_remove_selected)
+        QShortcut(QKeySequence("F5"), self, self.on_start)
+        QShortcut(QKeySequence("Escape"), self, self.on_stop)
+        QShortcut(QKeySequence("Ctrl+R"), self, self._retry_selected)
+
     def _build_task_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
+        # ── 拖拽区域 ──
         self.drop_frame = DropFrame()
         self.drop_frame.files_dropped.connect(self.on_drop_paths)
         layout.addWidget(self.drop_frame)
 
-        import_row = QWidget()
-        import_layout = QHBoxLayout(import_row)
-        import_layout.setContentsMargins(0, 0, 0, 0)
+        # ── 按钮栏：左侧文件操作 + 右侧运行控制 ──
+        btn_row = QWidget()
+        btn_layout = QHBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(6)
 
         self.add_file_btn = QPushButton("添加文件")
+        self.add_file_btn.setObjectName("secondaryBtn")
         self.add_file_btn.clicked.connect(self.on_add_file)
         self.add_folder_btn = QPushButton("添加文件夹")
+        self.add_folder_btn.setObjectName("secondaryBtn")
         self.add_folder_btn.clicked.connect(self.on_add_folder)
         self.remove_btn = QPushButton("删除所选")
+        self.remove_btn.setObjectName("dangerBtn")
         self.remove_btn.clicked.connect(self.on_remove_selected)
         self.clear_btn = QPushButton("清空列表")
+        self.clear_btn.setObjectName("dangerBtn")
         self.clear_btn.clicked.connect(self.on_clear_all)
-        self.start_btn = QPushButton("开始")
+
+        btn_layout.addWidget(self.add_file_btn)
+        btn_layout.addWidget(self.add_folder_btn)
+        btn_layout.addWidget(self.remove_btn)
+        btn_layout.addWidget(self.clear_btn)
+        btn_layout.addStretch(1)
+
+        self.start_btn = QPushButton("▶ 开始")
+        self.start_btn.setObjectName("primaryBtn")
         self.start_btn.clicked.connect(self.on_start)
-        self.stop_btn = QPushButton("停止")
+        self.stop_btn = QPushButton("⏹ 停止")
+        self.stop_btn.setObjectName("dangerBtn")
         self.stop_btn.clicked.connect(self.on_stop)
         self.stop_btn.setEnabled(False)
+        self.pause_btn = QPushButton("⏸ 暂停")
+        self.pause_btn.setObjectName("warningBtn")
+        self.pause_btn.clicked.connect(self._pause_selected)
+        self.pause_btn.setEnabled(False)
+        self.resume_btn = QPushButton("▶ 恢复")
+        self.resume_btn.setObjectName("primaryBtn")
+        self.resume_btn.clicked.connect(self._resume_selected)
+        self.resume_btn.setEnabled(False)
+        self.retry_btn = QPushButton("↻ 重试")
+        self.retry_btn.setObjectName("secondaryBtn")
+        self.retry_btn.clicked.connect(self._retry_selected)
         self.open_output_btn = QPushButton("打开输出目录")
+        self.open_output_btn.setObjectName("secondaryBtn")
         self.open_output_btn.clicked.connect(self.on_open_output_dir)
 
-        import_layout.addWidget(self.add_file_btn)
-        import_layout.addWidget(self.add_folder_btn)
-        import_layout.addWidget(self.remove_btn)
-        import_layout.addWidget(self.clear_btn)
-        import_layout.addStretch(1)
-        import_layout.addWidget(self.start_btn)
-        import_layout.addWidget(self.stop_btn)
-        import_layout.addWidget(self.open_output_btn)
-        layout.addWidget(import_row)
+        btn_layout.addWidget(self.start_btn)
+        btn_layout.addWidget(self.stop_btn)
+        btn_layout.addWidget(self.pause_btn)
+        btn_layout.addWidget(self.resume_btn)
+        btn_layout.addWidget(self.retry_btn)
+        btn_layout.addWidget(self.open_output_btn)
+        layout.addWidget(btn_row)
 
-        self.task_table = QTableWidget(0, 5)
-        self.task_table.setHorizontalHeaderLabels(["来源文件", "状态", "进度", "输出文件", "消息"])
-        self.task_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.task_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.task_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.task_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        self.task_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        self.task_table.verticalHeader().setVisible(False)
-        self.task_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.task_table.setAlternatingRowColors(True)
-        self.task_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        # ── 任务表格 ──
+        self.task_table = TaskTableWidget()
+        self.task_table.reorder_requested.connect(self._on_table_reorder)
         layout.addWidget(self.task_table)
 
+        # ── 总进度条 + 摘要 ──
         self.total_progress = QProgressBar()
         self.total_progress.setRange(0, 100)
         self.total_progress.setValue(0)
-        self.summary_label = QLabel("当前无运行任务")
+        self.total_progress.setFixedHeight(22)
+        self.total_progress.setFormat("%p%")
+        self.summary_label = QLabel("暂无任务")
+        self.summary_label.setStyleSheet("font-weight: 600; color: #374151;")
         layout.addWidget(self.total_progress)
         layout.addWidget(self.summary_label)
 
+        # ── 日志 ──
         self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setFixedHeight(140)
+        self.log_text.setFixedHeight(120)
         layout.addWidget(self.log_text)
         return page
 
@@ -246,32 +363,43 @@ class MainWindow(QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(12)
+        layout.setSpacing(8)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        for group in (
-            self._build_transcription_group(),
-            self._build_translation_group(),
-            self._build_output_group(),
-            self._build_preprocess_group(),
-        ):
+        # 可折叠分组
+        self._group_transcription = CollapsibleGroupBox("转写设置", collapsed=False)
+        self._group_transcription.add_widget(self._build_transcription_group_inner())
+
+        self._group_translation = CollapsibleGroupBox("翻译设置", collapsed=False)
+        self._group_translation.add_widget(self._build_translation_group_inner())
+
+        self._group_output = CollapsibleGroupBox("输出设置", collapsed=False)
+        self._group_output.add_widget(self._build_output_group_inner())
+
+        self._group_preprocess = CollapsibleGroupBox("预处理（VAD）", collapsed=True)
+        self._group_preprocess.add_widget(self._build_preprocess_group_inner())
+
+        for group in (self._group_transcription, self._group_translation, self._group_output, self._group_preprocess):
             group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
             layout.addWidget(group)
 
-        actions = QWidget()
-        actions.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-        actions_layout = QHBoxLayout(actions)
-        actions_layout.setContentsMargins(0, 0, 0, 0)
-        actions_layout.addStretch(1)
-        self.save_settings_btn = QPushButton("保存设置")
-        self.save_settings_btn.clicked.connect(self.on_save_settings)
-        actions_layout.addWidget(self.save_settings_btn)
-        layout.addWidget(actions)
         layout.addStretch(1)
+
+        # 保存按钮固定在底部
+        footer = QWidget()
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(0, 6, 0, 0)
+        footer_layout.addStretch(1)
+        self.save_settings_btn = QPushButton("保存设置")
+        self.save_settings_btn.setObjectName("primaryBtn")
+        self.save_settings_btn.clicked.connect(self.on_save_settings)
+        footer_layout.addWidget(self.save_settings_btn)
+
         scroll.setWidget(content)
+        outer_layout.addWidget(footer)
         return page
 
-    def _build_transcription_group(self) -> QGroupBox:
+    def _build_transcription_group_inner(self) -> QGroupBox:
         group = QGroupBox("转写设置")
         layout = QGridLayout(group)
 
@@ -419,7 +547,7 @@ class MainWindow(QMainWindow):
         ]
         return group
 
-    def _build_translation_group(self) -> QGroupBox:
+    def _build_translation_group_inner(self) -> QGroupBox:
         group = QGroupBox("翻译设置")
         layout = QGridLayout(group)
 
@@ -544,7 +672,7 @@ class MainWindow(QMainWindow):
         ]
         return group
 
-    def _build_output_group(self) -> QGroupBox:
+    def _build_output_group_inner(self) -> QGroupBox:
         group = QGroupBox("输出设置")
         layout = QGridLayout(group)
 
@@ -584,7 +712,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(format_row, 2, 0, 1, 2)
         return group
 
-    def _build_preprocess_group(self) -> QGroupBox:
+    def _build_preprocess_group_inner(self) -> QGroupBox:
         group = QGroupBox("预处理")
         layout = QGridLayout(group)
 
@@ -693,9 +821,10 @@ class MainWindow(QMainWindow):
                 border-bottom: none;
                 border-top-left-radius: 7px;
                 border-top-right-radius: 7px;
-                padding: 7px 18px;
+                padding: 8px 20px;
                 margin-right: 3px;
                 font-weight: 600;
+                font-size: 13px;
             }
             QTabBar::tab:selected {
                 background: #f9fbfd;
@@ -704,10 +833,10 @@ class MainWindow(QMainWindow):
             QTabBar::tab:!selected:hover { background: #e6f0fa; }
             QScrollArea, QScrollArea > QWidget > QWidget { background: #eef3f8; }
             QGroupBox {
-                border: 1px solid #b8c7d9;
+                border: 1px solid #c5d2df;
                 border-radius: 10px;
                 margin-top: 10px;
-                padding: 12px 8px 8px 8px;
+                padding: 14px 10px 10px 10px;
                 font-weight: 600;
                 background: #f9fbfd;
             }
@@ -721,101 +850,69 @@ class MainWindow(QMainWindow):
                 border: 2px dashed #4f83c2;
                 border-radius: 10px;
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f4f8fc, stop:1 #e1ecf8);
-                min-height: 84px;
+                min-height: 72px;
             }
             QLabel { color: #1c2b39; }
-            QCheckBox {
-                color: #1c2b39;
-                background: transparent;
-                spacing: 8px;
-                padding: 3px 2px;
-            }
-            QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
-                border: 1px solid #7f95ad;
-                border-radius: 4px;
-                background: white;
-            }
+            QCheckBox { color: #1c2b39; background: transparent; spacing: 8px; padding: 3px 2px; }
+            QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #7f95ad; border-radius: 4px; background: white; }
             QCheckBox::indicator:hover { border: 1px solid #2e78c7; }
-            QCheckBox::indicator:checked {
-                background: #2e78c7;
-                border: 1px solid #2e78c7;
-            }
-            QCheckBox::indicator:checked:hover {
-                background: #266ab1;
-                border: 1px solid #266ab1;
-            }
-            QCheckBox::indicator:disabled {
-                background: #edf2f7;
-                border: 1px solid #c5d2df;
-            }
-            QCheckBox::indicator:checked:disabled {
-                background: #9db5cc;
-                border: 1px solid #9db5cc;
-            }
+            QCheckBox::indicator:checked { background: #2e78c7; border: 1px solid #2e78c7; }
+            QCheckBox::indicator:checked:hover { background: #266ab1; border: 1px solid #266ab1; }
+            QCheckBox::indicator:disabled { background: #edf2f7; border: 1px solid #c5d2df; }
+            QCheckBox::indicator:checked:disabled { background: #9db5cc; border: 1px solid #9db5cc; }
+
             QPushButton {
-                background: #2e78c7;
-                color: white;
-                border: none;
-                border-radius: 7px;
-                padding: 7px 11px;
-                font-weight: 600;
+                background: #2e78c7; color: white; border: none; border-radius: 7px;
+                padding: 7px 14px; font-weight: 600;
             }
             QPushButton:hover { background: #266ab1; }
-            QPushButton:disabled {
-                background: #9db5cc;
-                color: #ebf2f9;
-            }
+            QPushButton:disabled { background: #9db5cc; color: #ebf2f9; }
+            QPushButton#primaryBtn { background: #2563eb; padding: 8px 18px; font-size: 13px; }
+            QPushButton#primaryBtn:hover { background: #1d4ed8; }
+            QPushButton#dangerBtn { background: #dc2626; }
+            QPushButton#dangerBtn:hover { background: #b91c1c; }
+            QPushButton#dangerBtn:disabled { background: #f3a0a0; color: #fef2f2; }
+            QPushButton#warningBtn { background: #d97706; }
+            QPushButton#warningBtn:hover { background: #b45309; }
+            QPushButton#secondaryBtn { background: #64748b; }
+            QPushButton#secondaryBtn:hover { background: #475569; }
+
             QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-                border: 1px solid #b4c4d4;
-                border-radius: 6px;
-                padding: 5px;
-                background: white;
-                color: #1c2b39;
+                border: 1px solid #b4c4d4; border-radius: 6px; padding: 5px; background: white; color: #1c2b39;
             }
             QLineEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {
-                background: #edf2f7;
-                color: #68798a;
-                border: 1px solid #c5d2df;
+                background: #edf2f7; color: #68798a; border: 1px solid #c5d2df;
             }
             QComboBox::drop-down, QSpinBox::up-button, QSpinBox::down-button,
             QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
-                border-left: 1px solid #b4c4d4;
-                background: #eef3f8;
-                width: 22px;
+                border-left: 1px solid #b4c4d4; background: #eef3f8; width: 22px;
             }
             QComboBox QAbstractItemView {
-                background: white;
-                color: #1c2b39;
-                selection-background-color: #d9e6f3;
-                selection-color: #1c2b39;
-                border: 1px solid #b4c4d4;
+                background: white; color: #1c2b39; selection-background-color: #d9e6f3;
+                selection-color: #1c2b39; border: 1px solid #b4c4d4;
             }
             QTableWidget {
-                border: 1px solid #b8c7d9;
-                border-radius: 8px;
-                background: white;
-                alternate-background-color: #f4f7fb;
+                border: 1px solid #b8c7d9; border-radius: 8px;
+                background: white; alternate-background-color: #f4f7fb;
+                gridline-color: #d9e2ec;
             }
+            QTableWidget::item { padding: 4px 6px; }
             QHeaderView::section {
-                background: #d9e6f3;
-                padding: 6px;
-                border: none;
-                border-right: 1px solid #bfd0e1;
-                color: #1a2a3a;
-                font-weight: 600;
+                background: #d0ddf0; padding: 7px 6px; border: none;
+                border-right: 1px solid #bfd0e1; color: #1a2a3a; font-weight: 700;
             }
             QProgressBar {
-                border: 1px solid #9eb4c8;
-                border-radius: 6px;
-                text-align: center;
-                background: #f4f8fc;
+                border: 1px solid #9eb4c8; border-radius: 6px;
+                text-align: center; background: #f4f8fc; font-weight: 600; font-size: 11px;
             }
-            QProgressBar::chunk {
-                background: #3f96dd;
-                border-radius: 5px;
+            QProgressBar::chunk { background: #3b82f6; border-radius: 5px; }
+            QMenu {
+                background: white; border: 1px solid #b8c7d9; border-radius: 6px;
+                padding: 4px 0px; color: #1c2b39;
             }
+            QMenu::item { padding: 6px 24px 6px 12px; }
+            QMenu::item:selected { background: #d9e6f3; color: #1a2a3a; }
+            QMenu::item:disabled { color: #9ca3af; }
             """
         )
         self.setFont(QFont("Segoe UI", 10))
@@ -1009,9 +1106,6 @@ class MainWindow(QMainWindow):
         if directory:
             self.output_dir_input.setText(directory)
 
-    def on_drop_paths(self, paths: List[str]) -> None:
-        self.add_paths(paths)
-
     def on_add_file(self) -> None:
         filters = (
             "媒体/字幕文件 (*.mp4 *.mov *.mkv *.avi *.wmv *.webm *.m4v *.flv *.ts "
@@ -1026,12 +1120,8 @@ class MainWindow(QMainWindow):
         if folder:
             self.add_paths([folder])
 
-    def normalize_path_key(self, path: Path) -> str:
-        try:
-            resolved = path.resolve()
-        except Exception:
-            resolved = path.absolute()
-        return str(resolved).casefold()
+    def on_drop_paths(self, paths: List[str]) -> None:
+        self.add_paths(paths)
 
     def add_paths(self, raw_paths: List[str]) -> None:
         allow_subtitle_import = self.allow_subtitle_import_checkbox.isChecked()
@@ -1060,75 +1150,377 @@ class MainWindow(QMainWindow):
 
         added = 0
         for path in discovered:
-            key = self.normalize_path_key(path)
-            if key in self.path_to_task:
-                continue
-            task_id = new_task_id()
             row = self.task_table.rowCount()
+            task_id = self.qm.add_task(path, row)
+            if task_id is None:
+                continue
             self.task_table.insertRow(row)
             self.task_table.setItem(row, 0, QTableWidgetItem(str(path)))
-            self.task_table.setItem(row, 1, QTableWidgetItem("排队中"))
+            status_item = QTableWidgetItem("排队中")
+            status_item.setForeground(QColor(STATUS_COLORS.get("Queued", "#6b7280")))
+            self.task_table.setItem(row, 1, status_item)
             progress_bar = QProgressBar()
             progress_bar.setRange(0, 100)
             progress_bar.setValue(0)
             self.task_table.setCellWidget(row, 2, progress_bar)
             self.task_table.setItem(row, 3, QTableWidgetItem("-"))
-            self.task_table.setItem(row, 4, QTableWidgetItem("就绪"))
-
-            self.tasks[task_id] = TaskState(task_id=task_id, source_path=path, row=row)
-            self.path_to_task[key] = task_id
+            self.task_table.setItem(row, 4, QTableWidgetItem("-"))
+            self.task_table.setItem(row, 5, QTableWidgetItem("就绪"))
             added += 1
 
         self.log(f"已添加 {added} 个文件")
         if skipped_subtitle > 0 and not allow_subtitle_import:
             self.log(f"已忽略 {skipped_subtitle} 个字幕文件（导入开关已关闭）")
-        self.update_summary_text()
+        self._update_summary()
+
+    # ──────────────────────────────────────────────────────────
+    #  任务操作
+    # ──────────────────────────────────────────────────────────
 
     def on_remove_selected(self) -> None:
-        if self.is_running:
+        if self.qm.is_running:
             QMessageBox.information(self, "任务进行中", "任务运行时无法删除行")
             return
         rows = sorted({idx.row() for idx in self.task_table.selectionModel().selectedRows()}, reverse=True)
         if not rows:
             return
-        remove_ids = [task_id for task_id, state in self.tasks.items() if state.row in rows]
+        remove_ids = self.qm.get_selected_task_ids(rows)
         for row in rows:
             self.task_table.removeRow(row)
-        for task_id in remove_ids:
-            self.path_to_task.pop(self.normalize_path_key(self.tasks[task_id].source_path), None)
-            self.tasks.pop(task_id, None)
-        self.rebuild_row_mapping()
+        self.qm.remove_tasks(remove_ids)
+        self._rebuild_row_mapping()
         self.log(f"已删除 {len(rows)} 行所选任务")
-        self.update_summary_text()
+        self._update_summary()
 
     def on_clear_all(self) -> None:
-        if self.is_running:
+        if self.qm.is_running:
             QMessageBox.information(self, "任务进行中", "请先停止运行中的任务再清空")
             return
         self.task_table.setRowCount(0)
-        self.tasks.clear()
-        self.path_to_task.clear()
-        self.active_run_ids.clear()
-        self.completed_run_ids.clear()
-        self.run_progress.clear()
-        self.futures.clear()
+        self.qm.clear_all()
         self.total_progress.setValue(0)
-        self.update_summary_text()
+        self._update_summary()
         self.log("已清空所有任务")
 
-    def rebuild_row_mapping(self) -> None:
+    def _rebuild_row_mapping(self) -> None:
         path_to_row: Dict[str, int] = {}
         for row in range(self.task_table.rowCount()):
             item = self.task_table.item(row, 0)
             if not item:
                 continue
-            path_to_row[self.normalize_path_key(Path(item.text()))] = row
-        for task in self.tasks.values():
-            key = self.normalize_path_key(task.source_path)
-            if key in path_to_row:
-                task.row = path_to_row[key]
+            path_to_row[normalize_path_key(Path(item.text()))] = row
+        self.qm.rebuild_row_mapping(path_to_row)
 
-    def collect_settings(self) -> AppSettings:
+    def on_start(self) -> None:
+        if self.qm.is_running:
+            return
+        if not self.qm.tasks:
+            QMessageBox.information(self, "没有任务", "请先添加文件")
+            return
+        try:
+            settings = self._validate_settings()
+        except Exception as exc:
+            QMessageBox.warning(self, "设置无效", str(exc))
+            return
+
+        run_ids = [tid for tid, t in self.qm.tasks.items() if t.status in {"Queued", "Failed", "Cancelled"}]
+        if not run_ids:
+            QMessageBox.information(self, "没有可执行任务", "当前没有可运行的排队/失败/取消任务")
+            return
+
+        has_media = any(self.qm.tasks[tid].source_path.suffix.lower() in MEDIA_EXTENSIONS for tid in run_ids)
+        has_subtitle = any(self.qm.tasks[tid].source_path.suffix.lower() in SUBTITLE_EXTENSIONS for tid in run_ids)
+        has_video = any(self.qm.tasks[tid].source_path.suffix.lower() in VIDEO_EXTENSIONS for tid in run_ids)
+        if (has_video or settings.vad.enabled) and not has_ffmpeg():
+            QMessageBox.warning(self, "缺少 ffmpeg",
+                "视频任务或 VAD 预切分需要 ffmpeg。当前运行环境未检测到内置或可用的 ffmpeg。")
+            return
+        if has_subtitle and settings.translation.mode == "none":
+            QMessageBox.warning(self, "翻译未启用", "导入字幕任务需要启用翻译模式")
+            return
+        if has_subtitle and not settings.translation.allow_subtitle_import:
+            QMessageBox.warning(self, "字幕导入已关闭", "请在设置中开启\u201c允许导入字幕文件并翻译\u201d")
+            return
+        if settings.transcription.provider == "mistral" and settings.transcription.timestamp_granularity != "none" and settings.transcription.language_mode == "manual":
+            self.log("Mistral 启用时间戳粒度后，language 参数将被忽略")
+
+        count = self.qm.start_batch(settings)
+        if count == 0:
+            return
+
+        for tid in self.qm.active_run_ids:
+            self._update_task_row(tid, "Queued", 0, "等待执行", "-")
+
+        self._flush_timer.start()
+        self._elapsed_timer.start()
+        self._update_button_states()
+
+        self.log(f"已启动 {count} 个任务，线程数：{settings.transcription.thread_count}")
+        if has_media and settings.transcription.provider == "whisper_openai_compatible":
+            self.log("转写后端：Whisper(OpenAI 兼容)")
+        self.total_progress.setValue(0)
+        self._update_summary()
+
+    def on_stop(self) -> None:
+        if not self.qm.is_running:
+            return
+        canceled = self.qm.stop_all()
+        self.log(f"已请求停止，取消了 {canceled} 个排队任务")
+
+    def on_batch_finished(self) -> None:
+        self._flush_timer.stop()
+        self._elapsed_timer.stop()
+        self._update_button_states()
+        summary = self.qm.get_summary()
+        self.log(f"任务结束：成功={summary['done']}，失败={summary['failed']}，取消={summary['canceled']}")
+        self.total_progress.setValue(0)
+        self._update_summary()
+
+    # ──────────────────────────────────────────────────────────
+    #  单任务操作（暂停/恢复/取消/重试）
+    # ──────────────────────────────────────────────────────────
+
+    def _pause_selected(self) -> None:
+        for row in {idx.row() for idx in self.task_table.selectionModel().selectedRows()}:
+            tid = self.qm.get_task_id_by_row(row)
+            if tid:
+                self.qm.pause_task(tid)
+
+    def _resume_selected(self) -> None:
+        for row in {idx.row() for idx in self.task_table.selectionModel().selectedRows()}:
+            tid = self.qm.get_task_id_by_row(row)
+            if tid:
+                self.qm.resume_task(tid)
+
+    def _cancel_selected(self) -> None:
+        for row in {idx.row() for idx in self.task_table.selectionModel().selectedRows()}:
+            tid = self.qm.get_task_id_by_row(row)
+            if tid:
+                self.qm.cancel_task(tid)
+
+    def _retry_selected(self) -> None:
+        rows = {idx.row() for idx in self.task_table.selectionModel().selectedRows()}
+        if rows:
+            tids = self.qm.get_selected_task_ids(list(rows))
+            reset = self.qm.retry_failed(tids)
+        else:
+            reset = self.qm.retry_failed()
+        for tid in reset:
+            self._update_task_row(tid, "Queued", 0, "等待重试", "-")
+        if reset:
+            self.log(f"已重置 {len(reset)} 个任务为排队状态")
+            self._update_summary()
+
+    # ──────────────────────────────────────────────────────────
+    #  右键菜单
+    # ──────────────────────────────────────────────────────────
+
+    def _build_context_menu(self, menu: QMenu) -> None:
+        rows = {idx.row() for idx in self.task_table.selectionModel().selectedRows()}
+        if not rows:
+            return
+
+        has_running = has_paused = has_failed = False
+        for row in rows:
+            tid = self.qm.get_task_id_by_row(row)
+            if not tid:
+                continue
+            s = self.qm.tasks[tid].status
+            if s in {"Preparing", "Extracting", "Transcribing", "Translating", "Writing", "Queued"}:
+                has_running = True
+            if s == "Paused":
+                has_paused = True
+            if s in {"Failed", "Cancelled"}:
+                has_failed = True
+
+        if has_running:
+            menu.addAction("取消所选任务", self._cancel_selected)
+            menu.addAction("\u23f8 暂停所选任务", self._pause_selected)
+        if has_paused:
+            menu.addAction("\u25b6 恢复所选任务", self._resume_selected)
+        if has_failed:
+            menu.addAction("\u21bb 重试所选任务", self._retry_selected)
+
+        menu.addSeparator()
+        selected_tids = self.qm.get_selected_task_ids(list(rows))
+        menu.addAction("上移优先级", lambda: self.qm.move_priority(selected_tids, +1))
+        menu.addAction("下移优先级", lambda: self.qm.move_priority(selected_tids, -1))
+
+        if not self.qm.is_running:
+            menu.addSeparator()
+            menu.addAction("删除所选", self.on_remove_selected)
+
+    # ──────────────────────────────────────────────────────────
+    #  拖拽排序
+    # ──────────────────────────────────────────────────────────
+
+    def _on_table_reorder(self) -> None:
+        ordered: List[str] = []
+        for row in range(self.task_table.rowCount()):
+            item = self.task_table.item(row, 0)
+            if not item:
+                continue
+            tid = self.qm.get_task_id_by_row(row)
+            if tid:
+                ordered.append(tid)
+        if ordered:
+            self.qm.reorder_by_rows(ordered)
+        self._rebuild_row_mapping()
+
+    # ──────────────────────────────────────────────────────────
+    #  表格行更新
+    # ──────────────────────────────────────────────────────────
+
+    def _update_task_row(self, task_id: str, status: str, progress: int, message: str, outputs: str = "-") -> None:
+        state = self.qm.tasks.get(task_id)
+        if not state:
+            return
+        row = state.row
+        if row >= self.task_table.rowCount():
+            return
+
+        # 状态列（带颜色）
+        status_item = self.task_table.item(row, 1)
+        if status_item:
+            status_item.setText(STATUS_LABELS.get(status, status))
+            status_item.setForeground(QColor(STATUS_COLORS.get(status, "#6b7280")))
+
+        # 进度列
+        progress_bar = self.task_table.cellWidget(row, 2)
+        if isinstance(progress_bar, QProgressBar):
+            progress_bar.setValue(progress)
+
+        # 耗时列
+        if state.start_time > 0:
+            end = state.end_time if state.end_time > 0 else time.monotonic()
+            elapsed_item = self.task_table.item(row, 3)
+            if elapsed_item:
+                elapsed_item.setText(self._format_duration(end - state.start_time))
+
+        # 输出列
+        out_item = self.task_table.item(row, 4)
+        if out_item:
+            out_item.setText(outputs)
+
+        # 消息列
+        msg_item = self.task_table.item(row, 5)
+        if msg_item:
+            display = message if len(message) <= 80 else message[:80] + "..."
+            msg_item.setText(display)
+            msg_item.setToolTip(message if len(message) > 80 else "")
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        if seconds <= 0:
+            return "-"
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
+
+    # ──────────────────────────────────────────────────────────
+    #  QueueManager 信号处理
+    # ──────────────────────────────────────────────────────────
+
+    def on_task_progress(self, task_id: str, status: str, progress: int, message: str) -> None:
+        self._update_task_row(task_id, status, progress, message)
+        self.total_progress.setValue(self.qm.get_total_progress())
+        self._update_summary()
+        self._update_button_states()
+
+    def on_task_finished(self, task_id: str, success: bool, status: str, message: str, outputs: dict) -> None:
+        state = self.qm.tasks.get(task_id)
+        if not state:
+            return
+        output_text = " | ".join(v for k, v in outputs.items() if k != "_detail") if outputs else "-"
+        self._update_task_row(task_id, status, 100 if success else state.progress, message, output_text)
+        if success:
+            self.log(f"[{task_id[:8]}] 已完成: {state.source_path.name}")
+        else:
+            self.log(f"[{task_id[:8]}] {STATUS_LABELS.get(status, status)}: {state.source_path.name} | {message}")
+        self.total_progress.setValue(self.qm.get_total_progress())
+        self._update_summary()
+        self._update_button_states()
+
+    def _update_elapsed_times(self) -> None:
+        for tid in self.qm.get_running_task_ids():
+            state = self.qm.tasks.get(tid)
+            if state and state.start_time > 0:
+                item = self.task_table.item(state.row, 3)
+                if item:
+                    item.setText(self._format_duration(time.monotonic() - state.start_time))
+
+    # ──────────────────────────────────────────────────────────
+    #  摘要 & 按钮状态
+    # ──────────────────────────────────────────────────────────
+
+    def _update_summary(self) -> None:
+        s = self.qm.get_summary()
+        total = s["total"]
+        if total == 0:
+            self.summary_label.setText("暂无任务")
+            self.summary_label.setStyleSheet("font-weight: 600; color: #374151;")
+            return
+        if self.qm.is_running:
+            done_batch = s["done"] + s["failed"] + s["canceled"]
+            self.summary_label.setText(
+                f"当前批次：已完成 {done_batch}/{total} | 运行中={s['running']} | 暂停={s['paused']}"
+            )
+            self.summary_label.setStyleSheet("font-weight: 600; color: #2563eb;")
+        else:
+            parts = [f"总数={total}", f"排队={s['queued']}", f"完成={s['done']}"]
+            if s["failed"] > 0:
+                parts.append(f"失败={s['failed']}")
+            if s["canceled"] > 0:
+                parts.append(f"取消={s['canceled']}")
+            self.summary_label.setText(" | ".join(parts))
+            color = "#dc2626" if s["failed"] > 0 else "#374151"
+            self.summary_label.setStyleSheet(f"font-weight: 600; color: {color};")
+
+    def _update_button_states(self) -> None:
+        running = self.qm.is_running
+        self.start_btn.setEnabled(not running)
+        self.stop_btn.setEnabled(running)
+        self.pause_btn.setEnabled(running)
+        self.resume_btn.setEnabled(running)
+        self.remove_btn.setEnabled(not running)
+        self.clear_btn.setEnabled(not running)
+        self.retry_btn.setEnabled(not running and bool(self.qm.get_failed_task_ids()))
+
+    # ──────────────────────────────────────────────────────────
+    #  输出目录 & 日志
+    # ──────────────────────────────────────────────────────────
+
+    def on_open_output_dir(self) -> None:
+        if self.output_mode_combo.currentData() == "source":
+            selected_rows = self.task_table.selectionModel().selectedRows()
+            if selected_rows:
+                item = self.task_table.item(selected_rows[0].row(), 0)
+                folder = Path(item.text()).parent if item else Path.cwd()
+            elif self.qm.tasks:
+                folder = next(iter(self.qm.tasks.values())).source_path.parent
+            else:
+                folder = Path.cwd()
+        else:
+            folder = Path(self.output_dir_input.text().strip() or str(Path.cwd() / "subtitles"))
+            folder.mkdir(parents=True, exist_ok=True)
+
+        if sys.platform.startswith("win"):
+            os.startfile(str(folder))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            import subprocess
+            subprocess.Popen(["open", str(folder)])
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", str(folder)])
+
+    def log(self, message: str) -> None:
+        self.log_text.appendPlainText(message)
+
+    # ──────────────────────────────────────────────────────────
+    #  设置验证
+    # ──────────────────────────────────────────────────────────
+
+    def _validate_settings(self) -> AppSettings:
         settings = self.collect_settings_from_ui()
         if settings.transcription.language_mode == "manual" and not settings.transcription.language:
             raise RuntimeError("已选择指定语言，请填写有效语言代码，例如 zh / en")
@@ -1148,12 +1540,7 @@ class MainWindow(QMainWindow):
                 raise RuntimeError("Whisper 转写需要填写第三方/OpenAI 兼容 API Key")
             if not settings.transcription.whisper.model:
                 raise RuntimeError("Whisper 转写需要填写模型名称")
-        if not (
-            settings.output.save_srt
-            or settings.output.save_lrc
-            or settings.output.save_txt
-            or settings.output.save_json
-        ):
+        if not (settings.output.save_srt or settings.output.save_lrc or settings.output.save_txt or settings.output.save_json):
             raise RuntimeError("请至少选择一种输出格式")
         if settings.output.mode == "custom":
             settings.output.output_dir.mkdir(parents=True, exist_ok=True)
@@ -1164,217 +1551,6 @@ class MainWindow(QMainWindow):
                     f"（导入错误：{type(transcription_provider._MISTRAL_IMPORT_ERROR).__name__}: "
                     f"{transcription_provider._MISTRAL_IMPORT_ERROR}）"
                 )
-            raise RuntimeError(f"缺少依赖：mistralai{details}")
+            raise RuntimeError(f"缺少依赖：mistral{details}")
         return settings
 
-    def on_start(self) -> None:
-        if self.is_running:
-            return
-        if not self.tasks:
-            QMessageBox.information(self, "没有任务", "请先添加文件")
-            return
-        try:
-            settings = self.collect_settings()
-        except Exception as exc:
-            QMessageBox.warning(self, "设置无效", str(exc))
-            return
-
-        run_ids = [task_id for task_id, task in self.tasks.items() if task.status in {"Queued", "Failed", "Cancelled"}]
-        if not run_ids:
-            QMessageBox.information(self, "没有可执行任务", "当前没有可运行的排队/失败/取消任务")
-            return
-
-        has_media = any(self.tasks[task_id].source_path.suffix.lower() in MEDIA_EXTENSIONS for task_id in run_ids)
-        has_subtitle = any(self.tasks[task_id].source_path.suffix.lower() in SUBTITLE_EXTENSIONS for task_id in run_ids)
-        has_video = any(self.tasks[task_id].source_path.suffix.lower() in VIDEO_EXTENSIONS for task_id in run_ids)
-        requires_ffmpeg = has_video or settings.vad.enabled
-        if requires_ffmpeg and not has_ffmpeg():
-            QMessageBox.warning(
-                self,
-                "缺少 ffmpeg",
-                "视频任务或 VAD 预切分需要 ffmpeg。当前运行环境未检测到内置或可用的 ffmpeg，请检查打包资源是否完整。",
-            )
-            return
-        if has_subtitle and settings.translation.mode == "none":
-            QMessageBox.warning(self, "翻译未启用", "导入字幕任务需要启用翻译模式")
-            return
-        if has_subtitle and not settings.translation.allow_subtitle_import:
-            QMessageBox.warning(self, "字幕导入已关闭", "请在设置中开启“允许导入字幕文件并翻译”")
-            return
-        if settings.transcription.provider == "mistral" and settings.transcription.timestamp_granularity != "none" and settings.transcription.language_mode == "manual":
-            self.log("Mistral 启用时间戳粒度后，language 参数将被忽略")
-
-        self.executor = ThreadPoolExecutor(max_workers=settings.transcription.thread_count)
-        self.cancel_event.clear()
-        self.active_run_ids = set(run_ids)
-        self.completed_run_ids.clear()
-        self.run_progress = {task_id: 0 for task_id in run_ids}
-        self.futures.clear()
-
-        self.is_running = True
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.remove_btn.setEnabled(False)
-        self.clear_btn.setEnabled(False)
-
-        for task_id in run_ids:
-            task = self.tasks[task_id]
-            self.update_task_row(task_id, "Queued", 0, "等待执行")
-            future = self.executor.submit(
-                run_task_worker,
-                task_id,
-                task.source_path,
-                settings,
-                self.signals,
-                self.cancel_event,
-            )
-            self.futures[task_id] = future
-
-        self.log(f"已启动 {len(run_ids)} 个任务，线程数：{settings.transcription.thread_count}")
-        if has_media and settings.transcription.provider == "whisper_openai_compatible":
-            self.log("转写后端：Whisper(OpenAI 兼容)")
-        self.update_total_progress()
-        self.update_summary_text()
-
-    def on_stop(self) -> None:
-        if not self.is_running:
-            return
-        self.cancel_event.set()
-        canceled_count = 0
-        for task_id, future in self.futures.items():
-            if task_id in self.completed_run_ids:
-                continue
-            if future.cancel():
-                canceled_count += 1
-                self.mark_task_done(task_id, False, "Cancelled", "启动前已取消", {})
-        self.log(f"已请求停止，取消了 {canceled_count} 个排队任务")
-
-    def on_open_output_dir(self) -> None:
-        if self.output_mode_combo.currentData() == "source":
-            selected_rows = self.task_table.selectionModel().selectedRows()
-            if selected_rows:
-                item = self.task_table.item(selected_rows[0].row(), 0)
-                folder = Path(item.text()).parent if item else Path.cwd()
-            elif self.tasks:
-                folder = next(iter(self.tasks.values())).source_path.parent
-            else:
-                folder = Path.cwd()
-        else:
-            folder = Path(self.output_dir_input.text().strip() or str(Path.cwd() / "subtitles"))
-            folder.mkdir(parents=True, exist_ok=True)
-
-        if sys.platform.startswith("win"):
-            os.startfile(str(folder))  # type: ignore[attr-defined]
-        elif sys.platform == "darwin":
-            import subprocess
-
-            subprocess.Popen(["open", str(folder)])
-        else:
-            import subprocess
-
-            subprocess.Popen(["xdg-open", str(folder)])
-
-    def update_task_row(self, task_id: str, status: str, progress: int, message: str, outputs: str = "-") -> None:
-        task = self.tasks.get(task_id)
-        if not task:
-            return
-        task.status = status
-        task.progress = progress
-        task.message = message
-        row = task.row
-
-        status_item = self.task_table.item(row, 1)
-        if status_item:
-            status_item.setText(STATUS_LABELS.get(status, status))
-        progress_bar = self.task_table.cellWidget(row, 2)
-        if isinstance(progress_bar, QProgressBar):
-            progress_bar.setValue(progress)
-        output_item = self.task_table.item(row, 3)
-        if output_item:
-            output_item.setText(outputs)
-        message_item = self.task_table.item(row, 4)
-        if message_item:
-            message_item.setText(message)
-
-    def on_task_progress(self, task_id: str, status: str, progress: int, message: str) -> None:
-        if task_id not in self.active_run_ids:
-            return
-        self.run_progress[task_id] = max(0, min(100, progress))
-        self.update_task_row(task_id, status, progress, message)
-        self.update_total_progress()
-
-    def on_task_finished(self, task_id: str, success: bool, status: str, message: str, outputs: dict) -> None:
-        self.mark_task_done(task_id, success, status, message, outputs)
-
-    def mark_task_done(self, task_id: str, success: bool, status: str, message: str, outputs: dict) -> None:
-        if task_id not in self.active_run_ids or task_id in self.completed_run_ids:
-            return
-        self.completed_run_ids.add(task_id)
-        self.run_progress[task_id] = 100 if success else self.run_progress.get(task_id, 0)
-        output_text = " | ".join(outputs.values()) if outputs else "-"
-        display_message = message
-        if status == "Failed" and len(display_message) > 180:
-            display_message = display_message[:180] + "..."
-        final_progress = 100 if success else max(0, self.run_progress.get(task_id, 0))
-        self.update_task_row(task_id, status, final_progress, display_message, output_text)
-
-        if success:
-            self.log(f"[{task_id[:8]}] 已完成: {self.tasks[task_id].source_path.name}")
-        else:
-            self.log(f"[{task_id[:8]}] {STATUS_LABELS.get(status, status)}: {self.tasks[task_id].source_path.name} | {message}")
-        self.update_total_progress()
-        self.update_summary_text()
-        if len(self.completed_run_ids) >= len(self.active_run_ids):
-            self.finish_run()
-
-    def finish_run(self) -> None:
-        finished_ids = list(self.active_run_ids)
-        if self.executor:
-            self.executor.shutdown(wait=False, cancel_futures=False)
-            self.executor = None
-        self.is_running = False
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.remove_btn.setEnabled(True)
-        self.clear_btn.setEnabled(True)
-
-        success_count = 0
-        failed_count = 0
-        canceled_count = 0
-        for task_id in finished_ids:
-            status = self.tasks[task_id].status
-            if status == "Completed":
-                success_count += 1
-            elif status == "Cancelled":
-                canceled_count += 1
-            else:
-                failed_count += 1
-        self.log(f"任务结束：成功={success_count}，失败={failed_count}，取消={canceled_count}")
-        self.active_run_ids.clear()
-        self.completed_run_ids.clear()
-        self.run_progress.clear()
-        self.futures.clear()
-        self.update_total_progress()
-        self.update_summary_text()
-
-    def update_total_progress(self) -> None:
-        if not self.active_run_ids:
-            self.total_progress.setValue(0)
-            return
-        value = int(round(sum(self.run_progress.get(task_id, 0) for task_id in self.active_run_ids) / len(self.active_run_ids)))
-        self.total_progress.setValue(max(0, min(100, value)))
-
-    def update_summary_text(self) -> None:
-        total = len(self.tasks)
-        if total == 0:
-            self.summary_label.setText("暂无任务")
-            return
-        if not self.active_run_ids:
-            queued = sum(1 for task in self.tasks.values() if task.status == "Queued")
-            done = sum(1 for task in self.tasks.values() if task.status == "Completed")
-            failed = sum(1 for task in self.tasks.values() if task.status == "Failed")
-            canceled = sum(1 for task in self.tasks.values() if task.status == "Cancelled")
-            self.summary_label.setText(f"总数={total} | 排队={queued} | 完成={done} | 失败={failed} | 取消={canceled}")
-            return
-        running = len(self.active_run_ids) - len(self.completed_run_ids)
-        self.summary_label.setText(f"当前批次：已完成 {len(self.completed_run_ids)}/{len(self.active_run_ids)} | 运行中={running}")

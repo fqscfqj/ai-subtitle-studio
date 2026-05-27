@@ -99,6 +99,10 @@ class TaskState:
     progress: int = 0
     message: str = "就绪"
     outputs: Dict[str, str] = field(default_factory=dict)
+    priority: int = 0
+    start_time: float = 0.0
+    end_time: float = 0.0
+    error_detail: str = ""
 
 
 @dataclass

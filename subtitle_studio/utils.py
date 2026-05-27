@@ -67,6 +67,14 @@ def new_task_id() -> str:
     return uuid.uuid4().hex
 
 
+def normalize_path_key(path: Path) -> str:
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path.absolute()
+    return str(resolved).casefold()
+
+
 def format_srt_timestamp(seconds: float) -> str:
     ms = max(0, int(round(seconds * 1000.0)))
     hours = ms // 3_600_000

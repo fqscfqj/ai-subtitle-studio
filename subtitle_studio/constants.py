@@ -47,6 +47,7 @@ STATUS_LABELS = {
     "Transcribing": "转写中",
     "Translating": "翻译中",
     "Writing": "写入文件",
+    "Paused": "已暂停",
     "Completed": "已完成",
     "Failed": "失败",
     "Cancelled": "已取消",
@@ -80,5 +81,26 @@ COMMON_LANGUAGE_CODES = {
     "ro",
     "hu",
     "uk",
+}
+
+# ── 队列/重试常量 ──────────────────────────────────────────────
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 2.0  # 秒，指数退避基数
+RETRYABLE_EXCEPTION_TYPES = (ConnectionError, TimeoutError, OSError)
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+PROGRESS_THROTTLE_MS = 100  # 进度信号节流间隔（毫秒）
+
+# ── 状态颜色 ──────────────────────────────────────────────────
+STATUS_COLORS: dict[str, str] = {
+    "Queued": "#6b7280",
+    "Preparing": "#3b82f6",
+    "Extracting": "#3b82f6",
+    "Transcribing": "#3b82f6",
+    "Translating": "#3b82f6",
+    "Writing": "#3b82f6",
+    "Paused": "#eab308",
+    "Completed": "#22c55e",
+    "Failed": "#ef4444",
+    "Cancelled": "#f97316",
 }
 
