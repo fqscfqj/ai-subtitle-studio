@@ -203,7 +203,7 @@ class TaskTableWidget(QTableWidget):
         # 获取父级 MainWindow
         mw = self.window()
         if hasattr(mw, "_build_context_menu"):
-            mw._build_context_menu(menu)
+            mw._build_context_menu(menu)  # type: ignore[attr-defined]
         if menu.actions():
             menu.exec(event.globalPos())
 
@@ -1512,9 +1512,6 @@ class MainWindow(QMainWindow):
         else:
             import subprocess
             subprocess.Popen(["xdg-open", str(folder)])
-
-    def log(self, message: str) -> None:
-        self.log_text.appendPlainText(message)
 
     # ──────────────────────────────────────────────────────────
     #  设置验证
