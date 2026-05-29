@@ -1,26 +1,30 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
-from PySide6.QtCore import QEvent, QModelIndex, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QFont, QKeySequence, QShortcut, QWheelEvent
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QKeySequence, QShortcut, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -30,10 +34,10 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
-    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -53,15 +57,30 @@ from .constants import (
     VIDEO_EXTENSIONS,
 )
 from .media import discover_supported_files
-from .models import AppSettings, TaskState
+from .models import AppSettings
 from .providers import transcription as transcription_provider
 from .queue_manager import TaskQueueManager
+from .theme import ThemeManager, ThemePalette
 from .utils import normalize_language_code, normalize_path_key, parse_context_bias
 
 
-# ──────────────────────────────────────────────────────────────
-#  自定义控件
-# ──────────────────────────────────────────────────────────────
+def refresh_widget_style(widget: QWidget) -> None:
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+    widget.update()
+
+
+def is_valid_language_code(value: str) -> bool:
+    return bool(re.fullmatch(r"[a-z]{2,3}(?:[-_][a-z]{2,4})?", value.strip().lower()))
+
+
+def is_valid_http_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value.strip())
+    except Exception:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
 
 class NoWheelComboBox(QComboBox):
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
@@ -78,67 +97,57 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
         event.ignore()
 
 
-class CollapsibleGroupBox(QWidget):
-    """可折叠的分组容器，带 ▶/▼ 箭头动画。"""
+class OptionCardButton(QPushButton):
+    def __init__(self, title: str, description: str = "", parent: Optional[QWidget] = None) -> None:
+        text = title if not description else f"{title}\n{description}"
+        super().__init__(text, parent)
+        self.setObjectName("optionCardButton")
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(76)
 
-    def __init__(self, title: str, parent: Optional[QWidget] = None, collapsed: bool = False) -> None:
-        super().__init__(parent)
-        self._collapsed = collapsed
 
-        self._header = QPushButton(f"  ▼  {title}" if not collapsed else f"  ▶  {title}")
-        self._header.setObjectName("collapsibleHeader")
-        self._header.setCheckable(True)
-        self._header.setChecked(not collapsed)
-        self._header.setStyleSheet(
-            "QPushButton#collapsibleHeader { text-align: left; font-weight: 700; font-size: 13px; "
-            "padding: 8px 12px; background: #dce6f2; border: 1px solid #b8c7d9; border-radius: 8px; "
-            "color: #1a2a3a; }"
-            "QPushButton#collapsibleHeader:hover { background: #d0ddef; }"
-        )
-        self._header.clicked.connect(self._toggle)
-
-        self._content = QWidget()
-        self._content_layout = QVBoxLayout(self._content)
-        self._content_layout.setContentsMargins(0, 0, 0, 0)
-        self._content_layout.setSpacing(0)
-        self._content.setVisible(not collapsed)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        layout.addWidget(self._header)
-        layout.addWidget(self._content)
-
-    def content_layout(self) -> QVBoxLayout:
-        return self._content_layout
-
-    def add_widget(self, widget: QWidget) -> None:
-        self._content_layout.addWidget(widget)
-
-    def _toggle(self) -> None:
-        self._collapsed = not self._collapsed
-        self._content.setVisible(not self._collapsed)
-        text = self._header.text()
-        if self._collapsed:
-            self._header.setText(text.replace("▼", "▶"))
-        else:
-            self._header.setText(text.replace("▶", "▼"))
+class ModePillButton(QPushButton):
+    def __init__(self, text: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(text, parent)
+        self.setObjectName("modePillButton")
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
 
 class DropFrame(QFrame):
     """拖拽区域，支持 hover 高亮。"""
+
     files_dropped = Signal(list)
 
     def __init__(self) -> None:
         super().__init__()
         self.setAcceptDrops(True)
         self.setObjectName("dropFrame")
+        self.setProperty("dragActive", False)
+
         layout = QVBoxLayout(self)
-        self._label = QLabel("＋  将视频/音频/字幕文件或文件夹拖拽到这里")
-        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setStyleSheet("color: #4f83c2; font-size: 14px; font-weight: 600;")
-        layout.addWidget(self._label)
-        self._base_style = self.styleSheet()
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(4)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._icon_label = QLabel("⤴")
+        self._icon_label.setObjectName("dropIconLabel")
+        self._icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._title_label = QLabel("拖拽视频 / 音频 / 字幕文件到这里")
+        self._title_label.setObjectName("dropTitleLabel")
+        self._title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._hint_label = QLabel("也支持整个文件夹，程序会自动递归识别可处理文件")
+        self._hint_label.setObjectName("dropHintLabel")
+        self._hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._hint_label.setWordWrap(True)
+
+        layout.addWidget(self._icon_label)
+        layout.addWidget(self._title_label)
+        layout.addWidget(self._hint_label)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
         if event.mimeData().hasUrls():
@@ -162,20 +171,14 @@ class DropFrame(QFrame):
         event.acceptProposedAction()
 
     def _set_hover(self, hover: bool) -> None:
-        if hover:
-            self._label.setStyleSheet("color: #1e5ba8; font-size: 14px; font-weight: 700;")
-            self.setStyleSheet(
-                "#dropFrame { border: 2px solid #2e78c7; border-radius: 10px; "
-                "background: #dce8f6; min-height: 84px; }"
-            )
-        else:
-            self._label.setStyleSheet("color: #4f83c2; font-size: 14px; font-weight: 600;")
-            self.setStyleSheet("")
+        self.setProperty("dragActive", hover)
+        refresh_widget_style(self)
 
 
 class TaskTableWidget(QTableWidget):
     """支持右键菜单和拖拽排序的任务表格。"""
-    reorder_requested = Signal()  # 拖拽排序完成信号
+
+    reorder_requested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(0, 6, parent)
@@ -188,6 +191,7 @@ class TaskTableWidget(QTableWidget):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.verticalHeader().setVisible(False)
+        self.verticalHeader().setDefaultSectionSize(36)
         self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.setAlternatingRowColors(True)
         self.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -195,12 +199,9 @@ class TaskTableWidget(QTableWidget):
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setDragDropOverwriteMode(False)
         self.setVerticalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
-        self.verticalHeader().setDefaultSectionSize(34)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
-        # 由 MainWindow 注入菜单，这里仅转发
         menu = QMenu(self)
-        # 获取父级 MainWindow
         mw = self.window()
         if hasattr(mw, "_build_context_menu"):
             mw._build_context_menu(menu)  # type: ignore[attr-defined]
@@ -215,46 +216,41 @@ class TaskTableWidget(QTableWidget):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self.setObjectName("mainWindow")
         self.setWindowTitle("Subtitle Studio 字幕工作台")
-        self.resize(1280, 860)
+        self.resize(1320, 900)
+        self._palette: ThemePalette = ThemeManager.palette("light")
+        self._button_groups: list[QButtonGroup] = []
 
-        # ── 队列管理器 ──
         self.qm = TaskQueueManager(self)
         self.qm.task_progress.connect(self.on_task_progress)
         self.qm.task_finished.connect(self.on_task_finished)
         self.qm.batch_finished.connect(self.on_batch_finished)
 
-        # ── 进度刷新定时器 ──
         self._flush_timer = QTimer(self)
         self._flush_timer.setInterval(120)
         self._flush_timer.timeout.connect(self.qm.flush_pending_progress)
 
-        # ── 耗时刷新定时器 ──
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._update_elapsed_times)
 
-        # ── API Key 同步标志 ──
-        self._syncing_mistral_api_key = False
-
         self.init_ui()
-        self.apply_style()
+        self.apply_style("light")
         self.load_settings_into_ui()
 
     def init_ui(self) -> None:
         root = QWidget()
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(14, 14, 14, 14)
-        root_layout.setSpacing(10)
+        root_layout.setSpacing(12)
 
-        tabs = QTabWidget()
-        tabs.addTab(self._build_task_page(), "任务")
-        tabs.addTab(self._build_settings_page(), "设置")
-        root_layout.addWidget(tabs)
-
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_task_page(), "任务")
+        self.tabs.addTab(self._build_settings_page(), "设置")
+        root_layout.addWidget(self.tabs)
         self.setCentralWidget(root)
 
-        # ── 键盘快捷键 ──
         QShortcut(QKeySequence("Delete"), self, self.on_remove_selected)
         QShortcut(QKeySequence("F5"), self, self.on_start)
         QShortcut(QKeySequence("Escape"), self, self.on_stop)
@@ -262,19 +258,19 @@ class MainWindow(QMainWindow):
 
     def _build_task_page(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("taskPage")
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(12)
 
-        # ── 拖拽区域 ──
         self.drop_frame = DropFrame()
         self.drop_frame.files_dropped.connect(self.on_drop_paths)
         layout.addWidget(self.drop_frame)
 
-        # ── 按钮栏：左侧文件操作 + 右侧运行控制 ──
-        btn_row = QWidget()
-        btn_layout = QHBoxLayout(btn_row)
-        btn_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_card = QFrame()
+        toolbar_card.setObjectName("taskToolbarCard")
+        btn_layout = QHBoxLayout(toolbar_card)
+        btn_layout.setContentsMargins(14, 12, 14, 12)
         btn_layout.setSpacing(6)
 
         self.add_file_btn = QPushButton("添加文件")
@@ -324,234 +320,434 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.resume_btn)
         btn_layout.addWidget(self.retry_btn)
         btn_layout.addWidget(self.open_output_btn)
-        layout.addWidget(btn_row)
+        layout.addWidget(toolbar_card)
 
-        # ── 任务表格 ──
         self.task_table = TaskTableWidget()
         self.task_table.reorder_requested.connect(self._on_table_reorder)
-        layout.addWidget(self.task_table)
+        layout.addWidget(self.task_table, 1)
 
-        # ── 总进度条 + 摘要 ──
         self.total_progress = QProgressBar()
+        self.total_progress.setObjectName("totalProgress")
         self.total_progress.setRange(0, 100)
         self.total_progress.setValue(0)
-        self.total_progress.setFixedHeight(22)
-        self.total_progress.setFormat("%p%")
+        self.total_progress.setTextVisible(False)
         self.summary_label = QLabel("暂无任务")
-        self.summary_label.setStyleSheet("font-weight: 600; color: #374151;")
+        self.summary_label.setObjectName("summaryLabel")
+        self.summary_label.setProperty("summaryState", "idle")
+        refresh_widget_style(self.summary_label)
         layout.addWidget(self.total_progress)
         layout.addWidget(self.summary_label)
 
-        # ── 日志 ──
+        log_card = QFrame()
+        log_card.setObjectName("logCard")
+        log_layout = QVBoxLayout(log_card)
+        log_layout.setContentsMargins(14, 12, 14, 12)
+        log_layout.setSpacing(8)
+
+        log_header = QWidget()
+        log_header_layout = QHBoxLayout(log_header)
+        log_header_layout.setContentsMargins(0, 0, 0, 0)
+        log_header_layout.setSpacing(8)
+        log_title = QLabel("运行日志")
+        log_title.setObjectName("sectionTitle")
+        self.log_autoscroll_checkbox = QCheckBox("自动滚动")
+        self.log_autoscroll_checkbox.setChecked(True)
+        self.clear_log_btn = QPushButton("清空日志")
+        self.clear_log_btn.setObjectName("secondaryBtn")
+        self.clear_log_btn.clicked.connect(self.on_clear_log)
+        log_header_layout.addWidget(log_title)
+        log_header_layout.addStretch(1)
+        log_header_layout.addWidget(self.log_autoscroll_checkbox)
+        log_header_layout.addWidget(self.clear_log_btn)
+
         self.log_text = QPlainTextEdit()
+        self.log_text.setObjectName("logText")
         self.log_text.setReadOnly(True)
-        self.log_text.setFixedHeight(120)
-        layout.addWidget(self.log_text)
+        self.log_text.setFixedHeight(160)
+        self.log_text.setPlaceholderText("运行中的任务进度、告警和错误会显示在这里")
+
+        log_layout.addWidget(log_header)
+        log_layout.addWidget(self.log_text)
+        layout.addWidget(log_card)
         return page
 
     def _build_settings_page(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("settingsPage")
         outer_layout = QVBoxLayout(page)
         outer_layout.setContentsMargins(0, 0, 0, 0)
-        outer_layout.setSpacing(0)
+        outer_layout.setSpacing(12)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        outer_layout.addWidget(scroll)
+        header_card = QFrame()
+        header_card.setObjectName("settingsHeaderCard")
+        header_layout = QHBoxLayout(header_card)
+        header_layout.setContentsMargins(18, 16, 18, 16)
+        header_layout.setSpacing(12)
 
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        header_text = QVBoxLayout()
+        header_text.setContentsMargins(0, 0, 0, 0)
+        header_text.setSpacing(4)
+        hero_title = QLabel("设置中心")
+        hero_title.setObjectName("heroTitle")
+        hero_desc = QLabel("按任务流程组织设置项，常用参数靠前，高级控制收拢到更合理的位置。")
+        hero_desc.setObjectName("heroDescription")
+        hero_desc.setWordWrap(True)
+        header_text.addWidget(hero_title)
+        header_text.addWidget(hero_desc)
 
-        # 可折叠分组
-        self._group_transcription = CollapsibleGroupBox("转写设置", collapsed=False)
-        self._group_transcription.add_widget(self._build_transcription_group_inner())
+        theme_box = QHBoxLayout()
+        theme_box.setContentsMargins(0, 0, 0, 0)
+        theme_box.setSpacing(8)
+        theme_label = self._field_label("界面主题")
+        self.theme_combo = NoWheelComboBox()
+        self.theme_combo.addItem("浅色", "light")
+        self.theme_combo.addItem("深色", "dark")
+        self.theme_combo.currentIndexChanged.connect(self.on_theme_changed)
+        theme_box.addWidget(theme_label)
+        theme_box.addWidget(self.theme_combo)
 
-        self._group_translation = CollapsibleGroupBox("翻译设置", collapsed=False)
-        self._group_translation.add_widget(self._build_translation_group_inner())
+        header_layout.addLayout(header_text, 1)
+        header_layout.addLayout(theme_box)
+        outer_layout.addWidget(header_card)
 
-        self._group_output = CollapsibleGroupBox("输出设置", collapsed=False)
-        self._group_output.add_widget(self._build_output_group_inner())
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(12)
 
-        self._group_preprocess = CollapsibleGroupBox("预处理（VAD）", collapsed=True)
-        self._group_preprocess.add_widget(self._build_preprocess_group_inner())
+        self.settings_nav = QListWidget()
+        self.settings_nav.setObjectName("settingsNav")
+        self.settings_nav.setFixedWidth(180)
+        self.settings_nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.settings_nav.setSpacing(4)
 
-        for group in (self._group_transcription, self._group_translation, self._group_output, self._group_preprocess):
-            group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-            layout.addWidget(group)
+        for title in ("🎙 转写", "🌐 翻译", "📤 输出", "🔉 预处理"):
+            self.settings_nav.addItem(QListWidgetItem(title))
 
-        layout.addStretch(1)
+        self.settings_stack = QStackedWidget()
+        self.settings_stack.addWidget(self._wrap_settings_panel(self._build_transcription_panel()))
+        self.settings_stack.addWidget(self._wrap_settings_panel(self._build_translation_panel()))
+        self.settings_stack.addWidget(self._wrap_settings_panel(self._build_output_panel()))
+        self.settings_stack.addWidget(self._wrap_settings_panel(self._build_preprocess_panel()))
 
-        # 保存按钮固定在底部
+        self.settings_nav.currentRowChanged.connect(self.settings_stack.setCurrentIndex)
+        self.settings_nav.setCurrentRow(0)
+
+        body_layout.addWidget(self.settings_nav)
+        body_layout.addWidget(self.settings_stack, 1)
+        outer_layout.addWidget(body, 1)
+
         footer = QWidget()
         footer_layout = QHBoxLayout(footer)
-        footer_layout.setContentsMargins(0, 6, 0, 0)
+        footer_layout.setContentsMargins(0, 0, 0, 0)
         footer_layout.addStretch(1)
         self.save_settings_btn = QPushButton("保存设置")
         self.save_settings_btn.setObjectName("primaryBtn")
         self.save_settings_btn.clicked.connect(self.on_save_settings)
         footer_layout.addWidget(self.save_settings_btn)
-
-        scroll.setWidget(content)
         outer_layout.addWidget(footer)
         return page
 
-    def _build_transcription_group_inner(self) -> QGroupBox:
-        group = QGroupBox("转写设置")
-        layout = QGridLayout(group)
+    def _wrap_settings_panel(self, panel: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(panel)
+        return scroll
 
-        self.transcription_provider_combo = NoWheelComboBox()
+    def _create_settings_panel(self, title: str, description: str) -> tuple[QWidget, QVBoxLayout]:
+        panel = QWidget()
+        panel.setObjectName("settingsPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(12)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("pageTitle")
+        desc_label = QLabel(description)
+        desc_label.setObjectName("pageDescription")
+        desc_label.setWordWrap(True)
+        layout.addWidget(title_label)
+        layout.addWidget(desc_label)
+        return panel, layout
+
+    def _build_card(self, title: str, description: str = "") -> tuple[QFrame, QVBoxLayout]:
+        card = QFrame()
+        card.setObjectName("settingsCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("sectionTitle")
+        layout.addWidget(title_label)
+        if description:
+            desc_label = QLabel(description)
+            desc_label.setObjectName("sectionDescription")
+            desc_label.setWordWrap(True)
+            layout.addWidget(desc_label)
+
+        body = QVBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(12)
+        layout.addLayout(body)
+        return card, body
+
+    def _form_grid(self) -> QGridLayout:
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(12)
+        grid.setColumnStretch(1, 1)
+        return grid
+
+    def _field_label(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("fieldLabel")
+        return label
+
+    def _build_secret_row(self, env_key: str = "") -> tuple[QWidget, QLineEdit, QCheckBox]:
+        line_edit = QLineEdit(os.environ.get(env_key, "") if env_key else "")
+        line_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        reveal_checkbox = QCheckBox("显示")
+        reveal_checkbox.toggled.connect(
+            lambda checked, target=line_edit: target.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+        )
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(line_edit)
+        layout.addWidget(reveal_checkbox)
+        return row, line_edit, reveal_checkbox
+
+    def _build_choice_buttons(
+        self,
+        combo: QComboBox,
+        options: list[tuple[str, str, str]],
+        compact: bool = False,
+    ) -> tuple[QWidget, dict[str, QPushButton]]:
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        group = QButtonGroup(container)
+        group.setExclusive(True)
+        self._button_groups.append(group)
+        mapping: dict[str, QPushButton] = {}
+
+        for index, (title, description, data) in enumerate(options):
+            button = ModePillButton(title) if compact else OptionCardButton(title, description)
+            layout.addWidget(button)
+            group.addButton(button, index)
+            mapping[data] = button
+            button.clicked.connect(
+                lambda checked, idx=index, target=combo: target.setCurrentIndex(idx) if checked else None
+            )
+        return container, mapping
+
+    def _sync_choice_buttons(self, combo: QComboBox, mapping: dict[str, QPushButton]) -> None:
+        current = combo.currentData()
+        for data, button in mapping.items():
+            blocked = button.blockSignals(True)
+            button.setChecked(data == current)
+            button.blockSignals(blocked)
+
+    def _build_transcription_panel(self) -> QWidget:
+        panel, layout = self._create_settings_panel(
+            "转写设置",
+            "先选择转写引擎，再填写该引擎真正需要的凭据和模型；无关项会自动收起。",
+        )
+
+        self.transcription_provider_combo = NoWheelComboBox(panel)
         self.transcription_provider_combo.addItem("Mistral", "mistral")
         self.transcription_provider_combo.addItem("Whisper(OpenAI 兼容)", "whisper_openai_compatible")
         self.transcription_provider_combo.addItem("Qwen3 ASR（DashScope）", "qwen3asr")
         self.transcription_provider_combo.currentIndexChanged.connect(self.on_transcription_provider_changed)
 
-        self.mistral_api_key_input = QLineEdit(os.environ.get("MISTRAL_API_KEY", ""))
-        self.mistral_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.mistral_api_key_input.textChanged.connect(self.on_transcription_mistral_key_changed)
-        self.show_mistral_key_checkbox = QCheckBox("显示")
-        self.show_mistral_key_checkbox.toggled.connect(
-            lambda checked: self.mistral_api_key_input.setEchoMode(
-                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
-            )
+        provider_card, provider_body = self._build_card(
+            "选择转写引擎",
+            "按后端能力挑选，Mistral 适合长音频与说话人分离，Whisper 兼容性强，Qwen3 ASR 更适合 DashScope 场景。",
         )
-        self.mistral_key_row = QWidget()
-        mistral_key_layout = QHBoxLayout(self.mistral_key_row)
-        mistral_key_layout.setContentsMargins(0, 0, 0, 0)
-        mistral_key_layout.addWidget(self.mistral_api_key_input)
-        mistral_key_layout.addWidget(self.show_mistral_key_checkbox)
+        provider_buttons, self.transcription_provider_buttons = self._build_choice_buttons(
+            self.transcription_provider_combo,
+            [
+                ("Mistral", "长音频友好 · 支持说话人分离", "mistral"),
+                ("Whisper", "OpenAI 兼容接口 · 接入灵活", "whisper_openai_compatible"),
+                ("Qwen3 ASR", "DashScope 接口 · 轻量快速", "qwen3asr"),
+            ],
+        )
+        provider_body.addWidget(provider_buttons)
+        layout.addWidget(provider_card)
 
+        credentials_card, credentials_body = self._build_card("引擎凭据与模型")
+        credentials_grid = self._form_grid()
+        credentials_body.addLayout(credentials_grid)
+
+        self.mistral_api_key_label = self._field_label("Mistral API Key")
+        self.mistral_key_row, self.mistral_api_key_input, self.show_mistral_key_checkbox = self._build_secret_row(
+            "MISTRAL_API_KEY"
+        )
+        self.mistral_model_label = self._field_label("Mistral 模型")
         self.mistral_model_combo = NoWheelComboBox()
         self.mistral_model_combo.setEditable(True)
         self.mistral_model_combo.addItems(["voxtral-mini-latest", "voxtral-small-latest"])
 
+        self.whisper_base_url_label = self._field_label("Whisper Base URL")
         self.whisper_base_url_input = QLineEdit("https://api.openai.com/v1")
+        self.whisper_api_key_label = self._field_label("Whisper API Key")
+        self.whisper_key_row, self.whisper_api_key_input, self.show_whisper_key_checkbox = self._build_secret_row(
+            "OPENAI_API_KEY"
+        )
+        self.whisper_model_label = self._field_label("Whisper 模型")
         self.whisper_model_input = QLineEdit("whisper-1")
-        self.whisper_api_key_input = QLineEdit(os.environ.get("OPENAI_API_KEY", ""))
-        self.whisper_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.show_whisper_key_checkbox = QCheckBox("显示")
-        self.show_whisper_key_checkbox.toggled.connect(
-            lambda checked: self.whisper_api_key_input.setEchoMode(
-                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
-            )
-        )
-        self.whisper_key_row = QWidget()
-        whisper_key_layout = QHBoxLayout(self.whisper_key_row)
-        whisper_key_layout.setContentsMargins(0, 0, 0, 0)
-        whisper_key_layout.addWidget(self.whisper_api_key_input)
-        whisper_key_layout.addWidget(self.show_whisper_key_checkbox)
 
-        self.qwen3asr_api_key_input = QLineEdit(os.environ.get("DASHSCOPE_API_KEY", ""))
-        self.qwen3asr_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.show_qwen3asr_key_checkbox = QCheckBox("显示")
-        self.show_qwen3asr_key_checkbox.toggled.connect(
-            lambda checked: self.qwen3asr_api_key_input.setEchoMode(
-                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
-            )
+        self.qwen3asr_api_key_label = self._field_label("DashScope API Key")
+        self.qwen3asr_key_row, self.qwen3asr_api_key_input, self.show_qwen3asr_key_checkbox = self._build_secret_row(
+            "DASHSCOPE_API_KEY"
         )
-        self.qwen3asr_key_row = QWidget()
-        qwen3asr_key_layout = QHBoxLayout(self.qwen3asr_key_row)
-        qwen3asr_key_layout.setContentsMargins(0, 0, 0, 0)
-        qwen3asr_key_layout.addWidget(self.qwen3asr_api_key_input)
-        qwen3asr_key_layout.addWidget(self.show_qwen3asr_key_checkbox)
-
+        self.qwen3asr_model_label = self._field_label("Qwen3 ASR 模型")
         self.qwen3asr_model_combo = NoWheelComboBox()
         self.qwen3asr_model_combo.setEditable(True)
-        self.qwen3asr_model_combo.addItems([
-            "qwen3-asr-flash",
-            "qwen3-asr-flash-2026-02-10",
-        ])
+        self.qwen3asr_model_combo.addItems(["qwen3-asr-flash", "qwen3-asr-flash-2026-02-10"])
 
+        self.diarize_checkbox = QCheckBox("启用说话人分离（仅 Mistral）")
+
+        credentials_grid.addWidget(self.mistral_api_key_label, 0, 0)
+        credentials_grid.addWidget(self.mistral_key_row, 0, 1)
+        credentials_grid.addWidget(self.mistral_model_label, 1, 0)
+        credentials_grid.addWidget(self.mistral_model_combo, 1, 1)
+        credentials_grid.addWidget(self.whisper_base_url_label, 2, 0)
+        credentials_grid.addWidget(self.whisper_base_url_input, 2, 1)
+        credentials_grid.addWidget(self.whisper_api_key_label, 3, 0)
+        credentials_grid.addWidget(self.whisper_key_row, 3, 1)
+        credentials_grid.addWidget(self.whisper_model_label, 4, 0)
+        credentials_grid.addWidget(self.whisper_model_input, 4, 1)
+        credentials_grid.addWidget(self.qwen3asr_api_key_label, 5, 0)
+        credentials_grid.addWidget(self.qwen3asr_key_row, 5, 1)
+        credentials_grid.addWidget(self.qwen3asr_model_label, 6, 0)
+        credentials_grid.addWidget(self.qwen3asr_model_combo, 6, 1)
+        credentials_grid.addWidget(self.diarize_checkbox, 7, 0, 1, 2)
+        layout.addWidget(credentials_card)
+
+        advanced_card, advanced_body = self._build_card(
+            "识别策略与高级参数",
+            "这里放与语言、时间戳、线程和重试行为相关的控制项，常用但不该抢占首页视线。",
+        )
+        advanced_grid = self._form_grid()
+        advanced_body.addLayout(advanced_grid)
+
+        self.language_mode_label = self._field_label("语言模式")
         self.language_mode_combo = NoWheelComboBox()
         self.language_mode_combo.addItems(["自动识别", "指定语言"])
         self.language_mode_combo.currentIndexChanged.connect(self.on_language_mode_changed)
+        self.language_label = self._field_label("指定语言")
         self.language_input = QLineEdit("zh")
+        self.timestamp_label = self._field_label("时间戳粒度")
         self.timestamp_combo = NoWheelComboBox()
         self.timestamp_combo.addItems(["none", "segment", "word"])
         self.timestamp_combo.setCurrentText("segment")
         self.timestamp_combo.currentIndexChanged.connect(self.on_timestamp_granularity_changed)
-        self.enable_segmentation_checkbox = QCheckBox("启用智能分段（仅 word 时间戳）")
-        self.enable_segmentation_checkbox.toggled.connect(self.on_intelligent_segmentation_changed)
-        self.segmentation_hint_label = QLabel("仅在时间戳粒度为 word 时生效；将调用专用 OpenAI 兼容 API 进行语义分段。")
-        self.segmentation_hint_label.setWordWrap(True)
-        self.segmentation_base_url_input = QLineEdit("https://api.openai.com/v1")
-        self.segmentation_model_input = QLineEdit("gpt-4o-mini")
-        self.segmentation_api_key_input = QLineEdit(os.environ.get("SEGMENTATION_OPENAI_API_KEY", ""))
-        self.segmentation_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.show_segmentation_key_checkbox = QCheckBox("显示")
-        self.show_segmentation_key_checkbox.toggled.connect(
-            lambda checked: self.segmentation_api_key_input.setEchoMode(
-                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
-            )
-        )
-        self.segmentation_key_row = QWidget()
-        segmentation_key_layout = QHBoxLayout(self.segmentation_key_row)
-        segmentation_key_layout.setContentsMargins(0, 0, 0, 0)
-        segmentation_key_layout.addWidget(self.segmentation_api_key_input)
-        segmentation_key_layout.addWidget(self.show_segmentation_key_checkbox)
-        self.diarize_checkbox = QCheckBox("启用说话人分离（仅 Mistral）")
+        self.thread_label = self._field_label("任务线程数")
         self.thread_spin = NoWheelSpinBox()
         self.thread_spin.setRange(1, 16)
         self.thread_spin.setValue(3)
+        self.max_retries_label = self._field_label("失败后重试次数")
+        self.max_retries_spin = NoWheelSpinBox()
+        self.max_retries_spin.setRange(0, 10)
+        self.max_retries_spin.setValue(3)
+        self.retry_base_delay_label = self._field_label("重试退避基准（秒）")
+        self.retry_base_delay_spin = NoWheelDoubleSpinBox()
+        self.retry_base_delay_spin.setRange(0.1, 30.0)
+        self.retry_base_delay_spin.setDecimals(1)
+        self.retry_base_delay_spin.setSingleStep(0.5)
+        self.retry_base_delay_spin.setValue(2.0)
+        self.context_bias_label = self._field_label("术语提示")
         self.context_bias_input = QPlainTextEdit()
-        self.context_bias_input.setPlaceholderText("术语提示/上下文偏置，使用逗号或换行分隔")
-        self.context_bias_input.setFixedHeight(64)
+        self.context_bias_input.setPlaceholderText("术语提示 / 上下文偏置，支持逗号或换行分隔")
+        self.context_bias_input.setFixedHeight(80)
 
-        self.transcription_provider_label = QLabel("转写提供方")
-        self.mistral_api_key_label = QLabel("Mistral API Key")
-        self.mistral_model_label = QLabel("Mistral 模型")
-        self.whisper_base_url_label = QLabel("Whisper Base URL")
-        self.whisper_api_key_label = QLabel("Whisper API Key")
-        self.whisper_model_label = QLabel("Whisper 模型")
-        self.qwen3asr_api_key_label = QLabel("DashScope API Key")
-        self.qwen3asr_model_label = QLabel("Qwen3 ASR 模型")
-        self.language_mode_label = QLabel("语言模式")
-        self.language_label = QLabel("指定语言")
-        self.timestamp_label = QLabel("时间戳粒度")
-        self.segmentation_base_url_label = QLabel("智能分段 Base URL")
-        self.segmentation_api_key_label = QLabel("智能分段 API Key")
-        self.segmentation_model_label = QLabel("智能分段模型")
-        self.thread_label = QLabel("任务线程数")
-        self.context_bias_label = QLabel("术语提示")
+        advanced_grid.addWidget(self.language_mode_label, 0, 0)
+        advanced_grid.addWidget(self.language_mode_combo, 0, 1)
+        advanced_grid.addWidget(self.language_label, 1, 0)
+        advanced_grid.addWidget(self.language_input, 1, 1)
+        advanced_grid.addWidget(self.timestamp_label, 2, 0)
+        advanced_grid.addWidget(self.timestamp_combo, 2, 1)
+        advanced_grid.addWidget(self.thread_label, 3, 0)
+        advanced_grid.addWidget(self.thread_spin, 3, 1)
+        advanced_grid.addWidget(self.max_retries_label, 4, 0)
+        advanced_grid.addWidget(self.max_retries_spin, 4, 1)
+        advanced_grid.addWidget(self.retry_base_delay_label, 5, 0)
+        advanced_grid.addWidget(self.retry_base_delay_spin, 5, 1)
+        advanced_grid.addWidget(self.context_bias_label, 6, 0)
+        advanced_grid.addWidget(self.context_bias_input, 6, 1)
+        layout.addWidget(advanced_card)
 
-        layout.addWidget(self.transcription_provider_label, 0, 0)
-        layout.addWidget(self.transcription_provider_combo, 0, 1)
-        layout.addWidget(self.mistral_api_key_label, 1, 0)
-        layout.addWidget(self.mistral_key_row, 1, 1)
-        layout.addWidget(self.mistral_model_label, 2, 0)
-        layout.addWidget(self.mistral_model_combo, 2, 1)
-        layout.addWidget(self.whisper_base_url_label, 3, 0)
-        layout.addWidget(self.whisper_base_url_input, 3, 1)
-        layout.addWidget(self.whisper_api_key_label, 4, 0)
-        layout.addWidget(self.whisper_key_row, 4, 1)
-        layout.addWidget(self.whisper_model_label, 5, 0)
-        layout.addWidget(self.whisper_model_input, 5, 1)
-        layout.addWidget(self.qwen3asr_api_key_label, 6, 0)
-        layout.addWidget(self.qwen3asr_key_row, 6, 1)
-        layout.addWidget(self.qwen3asr_model_label, 7, 0)
-        layout.addWidget(self.qwen3asr_model_combo, 7, 1)
-        layout.addWidget(self.language_mode_label, 8, 0)
-        layout.addWidget(self.language_mode_combo, 8, 1)
-        layout.addWidget(self.language_label, 9, 0)
-        layout.addWidget(self.language_input, 9, 1)
-        layout.addWidget(self.timestamp_label, 10, 0)
-        layout.addWidget(self.timestamp_combo, 10, 1)
-        layout.addWidget(self.enable_segmentation_checkbox, 11, 0, 1, 2)
-        layout.addWidget(self.segmentation_hint_label, 12, 0, 1, 2)
-        layout.addWidget(self.segmentation_base_url_label, 13, 0)
-        layout.addWidget(self.segmentation_base_url_input, 13, 1)
-        layout.addWidget(self.segmentation_api_key_label, 14, 0)
-        layout.addWidget(self.segmentation_key_row, 14, 1)
-        layout.addWidget(self.segmentation_model_label, 15, 0)
-        layout.addWidget(self.segmentation_model_input, 15, 1)
-        layout.addWidget(self.thread_label, 16, 0)
-        layout.addWidget(self.thread_spin, 16, 1)
-        layout.addWidget(self.context_bias_label, 17, 0)
-        layout.addWidget(self.context_bias_input, 17, 1)
-        layout.addWidget(self.diarize_checkbox, 18, 0, 1, 2)
+        segmentation_card, segmentation_body = self._build_card(
+            "智能分段",
+            "只在词级时间戳可用时启用；分段完成后，翻译与写出会沿用重建后的片段。",
+        )
+        self.enable_segmentation_checkbox = QCheckBox("启用智能分段（仅 word 时间戳）")
+        self.enable_segmentation_checkbox.toggled.connect(self.on_intelligent_segmentation_changed)
+        self.segmentation_hint_label = QLabel("仅在时间戳粒度为 word 时生效；将调用专用 OpenAI 兼容 API 进行语义分段。")
+        self.segmentation_hint_label.setObjectName("mutedLabel")
+        self.segmentation_hint_label.setWordWrap(True)
+        self.segmentation_thinking_checkbox = QCheckBox("启用思考模式（Reasoning）")
+        self.segmentation_thinking_checkbox.setToolTip(
+            "开启后将使用模型的思考能力来做语义分段；关闭时可手动通过温度控制输出稳定性。"
+        )
+        self.segmentation_thinking_checkbox.toggled.connect(self.on_segmentation_thinking_changed)
+
+        segmentation_grid = self._form_grid()
+        self.segmentation_base_url_label = self._field_label("智能分段 Base URL")
+        self.segmentation_base_url_input = QLineEdit("https://api.openai.com/v1")
+        self.segmentation_api_key_label = self._field_label("智能分段 API Key")
+        self.segmentation_key_row, self.segmentation_api_key_input, self.show_segmentation_key_checkbox = self._build_secret_row(
+            "SEGMENTATION_OPENAI_API_KEY"
+        )
+        self.segmentation_model_label = self._field_label("智能分段模型")
+        self.segmentation_model_input = QLineEdit("gpt-4o-mini")
+        self.segmentation_reasoning_effort_label = self._field_label("思考强度")
+        self.segmentation_reasoning_effort_combo = NoWheelComboBox()
+        self.segmentation_reasoning_effort_combo.addItem("low", "low")
+        self.segmentation_reasoning_effort_combo.addItem("medium", "medium")
+        self.segmentation_reasoning_effort_combo.addItem("high", "high")
+        self.segmentation_reasoning_effort_combo.addItem("max", "max")
+        self.segmentation_reasoning_effort_combo.setCurrentText("high")
+        self.segmentation_temperature_label = self._field_label("分段温度")
+        self.segmentation_temperature_spin = NoWheelDoubleSpinBox()
+        self.segmentation_temperature_spin.setRange(0.0, 2.0)
+        self.segmentation_temperature_spin.setDecimals(1)
+        self.segmentation_temperature_spin.setSingleStep(0.1)
+        self.segmentation_temperature_spin.setValue(0.1)
+        self.segmentation_window_label = self._field_label("窗口最大词数")
+        self.segmentation_window_spin = NoWheelSpinBox()
+        self.segmentation_window_spin.setRange(50, 500)
+        self.segmentation_window_spin.setSingleStep(10)
+        self.segmentation_window_spin.setValue(180)
+
+        segmentation_grid.addWidget(self.segmentation_base_url_label, 0, 0)
+        segmentation_grid.addWidget(self.segmentation_base_url_input, 0, 1)
+        segmentation_grid.addWidget(self.segmentation_api_key_label, 1, 0)
+        segmentation_grid.addWidget(self.segmentation_key_row, 1, 1)
+        segmentation_grid.addWidget(self.segmentation_model_label, 2, 0)
+        segmentation_grid.addWidget(self.segmentation_model_input, 2, 1)
+        segmentation_grid.addWidget(self.segmentation_reasoning_effort_label, 3, 0)
+        segmentation_grid.addWidget(self.segmentation_reasoning_effort_combo, 3, 1)
+        segmentation_grid.addWidget(self.segmentation_temperature_label, 4, 0)
+        segmentation_grid.addWidget(self.segmentation_temperature_spin, 4, 1)
+        segmentation_grid.addWidget(self.segmentation_window_label, 5, 0)
+        segmentation_grid.addWidget(self.segmentation_window_spin, 5, 1)
+
+        segmentation_body.addWidget(self.enable_segmentation_checkbox)
+        segmentation_body.addWidget(self.segmentation_hint_label)
+        segmentation_body.addWidget(self.segmentation_thinking_checkbox)
+        segmentation_body.addLayout(segmentation_grid)
+        layout.addWidget(segmentation_card)
+        layout.addStretch(1)
 
         self.transcription_mistral_key_widgets = [
             self.mistral_api_key_label,
@@ -583,151 +779,183 @@ class MainWindow(QMainWindow):
             self.segmentation_key_row,
             self.segmentation_model_label,
             self.segmentation_model_input,
+            self.segmentation_thinking_checkbox,
+            self.segmentation_reasoning_effort_label,
+            self.segmentation_reasoning_effort_combo,
+            self.segmentation_temperature_label,
+            self.segmentation_temperature_spin,
+            self.segmentation_window_label,
+            self.segmentation_window_spin,
         ]
-        return group
+        return panel
 
-    def _build_translation_group_inner(self) -> QGroupBox:
-        group = QGroupBox("翻译设置")
-        layout = QGridLayout(group)
+    def _build_translation_panel(self) -> QWidget:
+        panel, layout = self._create_settings_panel(
+            "翻译设置",
+            "把基础参数、输出选项和高级推理参数拆开显示，避免所有开关在同一块里抢戏。",
+        )
 
-        self.translation_mode_combo = NoWheelComboBox()
+        self.translation_mode_combo = NoWheelComboBox(panel)
         self.translation_mode_combo.addItem("不翻译", "none")
         self.translation_mode_combo.addItem("Mistral API 翻译", "mistral")
         self.translation_mode_combo.addItem("OpenAI 兼容 API 翻译", "openai")
         self.translation_mode_combo.currentIndexChanged.connect(self.on_translation_mode_changed)
 
+        mode_card, mode_body = self._build_card("翻译模式")
+        mode_buttons, self.translation_mode_buttons = self._build_choice_buttons(
+            self.translation_mode_combo,
+            [
+                ("不翻译", "只输出转写结果", "none"),
+                ("Mistral", "复用转写页中的 Mistral Key", "mistral"),
+                ("OpenAI 兼容", "适配 DeepSeek / OpenAI / 自建兼容服务", "openai"),
+            ],
+        )
+        mode_body.addWidget(mode_buttons)
+        layout.addWidget(mode_card)
+
+        self.translation_basic_card, basic_body = self._build_card("基础参数")
+        basic_grid = self._form_grid()
+        basic_body.addLayout(basic_grid)
+        self.translation_target_label = self._field_label("目标语言")
         self.translation_target_input = QLineEdit("zh")
+        self.translation_model_label = self._field_label("翻译模型")
         self.translation_model_input = QLineEdit("mistral-small-latest")
+        self.subtitle_translation_thread_label = self._field_label("字幕翻译线程数")
+        self.subtitle_translation_thread_spin = NoWheelSpinBox()
+        self.subtitle_translation_thread_spin.setRange(1, 16)
+        self.subtitle_translation_thread_spin.setValue(3)
+        basic_grid.addWidget(self.translation_target_label, 0, 0)
+        basic_grid.addWidget(self.translation_target_input, 0, 1)
+        basic_grid.addWidget(self.translation_model_label, 1, 0)
+        basic_grid.addWidget(self.translation_model_input, 1, 1)
+        basic_grid.addWidget(self.subtitle_translation_thread_label, 2, 0)
+        basic_grid.addWidget(self.subtitle_translation_thread_spin, 2, 1)
+        layout.addWidget(self.translation_basic_card)
+
+        self.translation_output_card, output_body = self._build_card("翻译输出行为")
         self.translation_bilingual_checkbox = QCheckBox("SRT 输出双语（原文 + 译文）")
         self.translation_bilingual_checkbox.setChecked(True)
         self.translation_keep_original_checkbox = QCheckBox("翻译后额外输出原文字幕（xxx.orig.srt）")
         self.allow_subtitle_import_checkbox = QCheckBox("允许导入字幕文件并翻译")
         self.allow_subtitle_import_checkbox.setChecked(True)
-        self.subtitle_translation_thread_spin = NoWheelSpinBox()
-        self.subtitle_translation_thread_spin.setRange(1, 16)
-        self.subtitle_translation_thread_spin.setValue(3)
+        output_body.addWidget(self.translation_bilingual_checkbox)
+        output_body.addWidget(self.translation_keep_original_checkbox)
+        output_body.addWidget(self.allow_subtitle_import_checkbox)
+        layout.addWidget(self.translation_output_card)
 
+        self.translation_reasoning_card, reasoning_body = self._build_card(
+            "思考与高级参数",
+            "思考模式适合追求更稳的翻译质量；关闭思考后，可手动调温度来控制输出风格。",
+        )
         self.translation_thinking_checkbox = QCheckBox("启用思考模式（Reasoning）")
         self.translation_thinking_checkbox.setToolTip(
-            "开启后将使用模型的深度思考能力，可能提升翻译质量但会增加延迟和消耗。\n"
-            "支持 DeepSeek、OpenAI 等兼容 reasoning_effort 的模型。\n"
-            "思考模式下 temperature 参数将被忽略。"
+            "开启后将使用模型的深度思考能力，可能提升翻译质量，但也会增加延迟和消耗。"
         )
+        self.translation_thinking_checkbox.toggled.connect(self.on_translation_thinking_changed)
+        reasoning_grid = self._form_grid()
+        self.translation_reasoning_effort_label = self._field_label("思考强度")
         self.translation_reasoning_effort_combo = NoWheelComboBox()
         self.translation_reasoning_effort_combo.addItem("low", "low")
         self.translation_reasoning_effort_combo.addItem("medium", "medium")
         self.translation_reasoning_effort_combo.addItem("high", "high")
         self.translation_reasoning_effort_combo.addItem("max", "max")
         self.translation_reasoning_effort_combo.setCurrentText("high")
-        self.translation_reasoning_effort_combo.setToolTip(
-            "思考强度：low / medium / high / max\n"
-            "越高质量越好但延迟和消耗越大。\n"
-            "DeepSeek 模型下 low/medium 会映射为 high。"
-        )
-        self.translation_reasoning_effort_label = QLabel("思考强度")
+        self.translation_temperature_label = self._field_label("翻译温度")
+        self.translation_temperature_spin = NoWheelDoubleSpinBox()
+        self.translation_temperature_spin.setRange(0.0, 2.0)
+        self.translation_temperature_spin.setDecimals(1)
+        self.translation_temperature_spin.setSingleStep(0.1)
+        self.translation_temperature_spin.setValue(0.2)
+        self.translation_chunk_size_label = self._field_label("每批翻译条数")
+        self.translation_chunk_size_spin = NoWheelSpinBox()
+        self.translation_chunk_size_spin.setRange(10, 100)
+        self.translation_chunk_size_spin.setSingleStep(5)
+        self.translation_chunk_size_spin.setValue(40)
+        reasoning_grid.addWidget(self.translation_reasoning_effort_label, 0, 0)
+        reasoning_grid.addWidget(self.translation_reasoning_effort_combo, 0, 1)
+        reasoning_grid.addWidget(self.translation_temperature_label, 1, 0)
+        reasoning_grid.addWidget(self.translation_temperature_spin, 1, 1)
+        reasoning_grid.addWidget(self.translation_chunk_size_label, 2, 0)
+        reasoning_grid.addWidget(self.translation_chunk_size_spin, 2, 1)
+        reasoning_body.addWidget(self.translation_thinking_checkbox)
+        reasoning_body.addLayout(reasoning_grid)
+        layout.addWidget(self.translation_reasoning_card)
 
-        self.translation_mistral_api_key_input = QLineEdit(os.environ.get("MISTRAL_API_KEY", ""))
-        self.translation_mistral_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.translation_mistral_api_key_input.textChanged.connect(self.on_translation_mistral_key_changed)
-        self.show_translation_mistral_key_checkbox = QCheckBox("显示")
-        self.show_translation_mistral_key_checkbox.toggled.connect(
-            lambda checked: self.translation_mistral_api_key_input.setEchoMode(
-                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
-            )
-        )
-        self.translation_mistral_key_row = QWidget()
-        translation_mistral_key_layout = QHBoxLayout(self.translation_mistral_key_row)
-        translation_mistral_key_layout.setContentsMargins(0, 0, 0, 0)
-        translation_mistral_key_layout.addWidget(self.translation_mistral_api_key_input)
-        translation_mistral_key_layout.addWidget(self.show_translation_mistral_key_checkbox)
-
+        self.translation_access_card, access_body = self._build_card("接口接入")
+        self.translation_mistral_hint_label = QLabel("Mistral 翻译直接复用转写页中的 Mistral API Key，无需重复填写。")
+        self.translation_mistral_hint_label.setObjectName("mutedLabel")
+        self.translation_mistral_hint_label.setWordWrap(True)
+        access_grid = self._form_grid()
+        self.translation_openai_base_label = self._field_label("OpenAI 兼容 Base URL")
         self.translation_openai_base_input = QLineEdit("https://api.openai.com/v1")
-        self.translation_openai_key_input = QLineEdit(os.environ.get("OPENAI_API_KEY", ""))
-        self.translation_openai_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.show_translation_openai_key_checkbox = QCheckBox("显示")
-        self.show_translation_openai_key_checkbox.toggled.connect(
-            lambda checked: self.translation_openai_key_input.setEchoMode(
-                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
-            )
+        self.translation_openai_key_label = self._field_label("OpenAI 兼容 API Key")
+        self.translation_openai_key_row, self.translation_openai_key_input, self.show_translation_openai_key_checkbox = self._build_secret_row(
+            "OPENAI_API_KEY"
         )
-        self.translation_openai_key_row = QWidget()
-        openai_key_layout = QHBoxLayout(self.translation_openai_key_row)
-        openai_key_layout.setContentsMargins(0, 0, 0, 0)
-        openai_key_layout.addWidget(self.translation_openai_key_input)
-        openai_key_layout.addWidget(self.show_translation_openai_key_checkbox)
+        access_grid.addWidget(self.translation_openai_base_label, 0, 0)
+        access_grid.addWidget(self.translation_openai_base_input, 0, 1)
+        access_grid.addWidget(self.translation_openai_key_label, 1, 0)
+        access_grid.addWidget(self.translation_openai_key_row, 1, 1)
+        access_body.addWidget(self.translation_mistral_hint_label)
+        access_body.addLayout(access_grid)
+        layout.addWidget(self.translation_access_card)
+        layout.addStretch(1)
 
-        self.translation_mode_label = QLabel("翻译模式")
-        self.translation_target_label = QLabel("目标语言")
-        self.translation_model_label = QLabel("翻译模型")
-        self.subtitle_translation_thread_label = QLabel("字幕翻译线程数")
-        self.translation_mistral_api_key_label = QLabel("Mistral API Key")
-        self.translation_openai_base_label = QLabel("OpenAI 兼容 Base URL")
-        self.translation_openai_key_label = QLabel("OpenAI 兼容 API Key")
-
-        layout.addWidget(self.translation_mode_label, 0, 0)
-        layout.addWidget(self.translation_mode_combo, 0, 1)
-        layout.addWidget(self.translation_target_label, 1, 0)
-        layout.addWidget(self.translation_target_input, 1, 1)
-        layout.addWidget(self.translation_model_label, 2, 0)
-        layout.addWidget(self.translation_model_input, 2, 1)
-        layout.addWidget(self.translation_bilingual_checkbox, 3, 0, 1, 2)
-        layout.addWidget(self.translation_keep_original_checkbox, 4, 0, 1, 2)
-        layout.addWidget(self.allow_subtitle_import_checkbox, 5, 0, 1, 2)
-        layout.addWidget(self.subtitle_translation_thread_label, 6, 0)
-        layout.addWidget(self.subtitle_translation_thread_spin, 6, 1)
-        layout.addWidget(self.translation_thinking_checkbox, 7, 0, 1, 2)
-        layout.addWidget(self.translation_reasoning_effort_label, 8, 0)
-        layout.addWidget(self.translation_reasoning_effort_combo, 8, 1)
-        layout.addWidget(self.translation_mistral_api_key_label, 9, 0)
-        layout.addWidget(self.translation_mistral_key_row, 9, 1)
-        layout.addWidget(self.translation_openai_base_label, 10, 0)
-        layout.addWidget(self.translation_openai_base_input, 10, 1)
-        layout.addWidget(self.translation_openai_key_label, 11, 0)
-        layout.addWidget(self.translation_openai_key_row, 11, 1)
-
-        self.translation_common_widgets = [
-            self.translation_target_label,
-            self.translation_target_input,
-            self.translation_model_label,
-            self.translation_model_input,
-            self.translation_bilingual_checkbox,
-            self.translation_keep_original_checkbox,
-            self.allow_subtitle_import_checkbox,
-            self.subtitle_translation_thread_label,
-            self.subtitle_translation_thread_spin,
-            self.translation_thinking_checkbox,
-            self.translation_reasoning_effort_label,
-            self.translation_reasoning_effort_combo,
+        self.translation_common_cards = [
+            self.translation_basic_card,
+            self.translation_output_card,
+            self.translation_reasoning_card,
+            self.translation_access_card,
         ]
-        self.translation_mistral_widgets = [
-            self.translation_mistral_api_key_label,
-            self.translation_mistral_key_row,
-        ]
+        self.translation_mistral_widgets = [self.translation_mistral_hint_label]
         self.translation_openai_widgets = [
             self.translation_openai_base_label,
             self.translation_openai_base_input,
             self.translation_openai_key_label,
             self.translation_openai_key_row,
         ]
-        return group
+        return panel
 
-    def _build_output_group_inner(self) -> QGroupBox:
-        group = QGroupBox("输出设置")
-        layout = QGridLayout(group)
+    def _build_output_panel(self) -> QWidget:
+        panel, layout = self._create_settings_panel(
+            "输出设置",
+            "把目标目录和输出格式拆分显示，常规导出选项一眼就能看明白。",
+        )
 
-        self.output_mode_combo = NoWheelComboBox()
+        self.output_mode_combo = NoWheelComboBox(panel)
         self.output_mode_combo.addItem("输出到原文件目录", "source")
         self.output_mode_combo.addItem("输出到指定目录", "custom")
         self.output_mode_combo.currentIndexChanged.connect(self.on_output_mode_changed)
+
+        location_card, location_body = self._build_card("输出位置")
+        location_buttons, self.output_mode_buttons = self._build_choice_buttons(
+            self.output_mode_combo,
+            [
+                ("输出到原目录", "与源文件放在一起", "source"),
+                ("指定目录", "集中导出到单独文件夹", "custom"),
+            ],
+            compact=True,
+        )
+        location_body.addWidget(location_buttons)
+
+        location_grid = self._form_grid()
+        self.output_dir_label = self._field_label("指定输出目录")
         self.output_dir_input = QLineEdit(str(Path.cwd() / "subtitles"))
         self.output_btn = QPushButton("浏览")
+        self.output_btn.setObjectName("secondaryBtn")
         self.output_btn.clicked.connect(self.on_choose_output_dir)
         output_row = QWidget()
         output_layout = QHBoxLayout(output_row)
         output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.setSpacing(8)
         output_layout.addWidget(self.output_dir_input)
         output_layout.addWidget(self.output_btn)
+        location_grid.addWidget(self.output_dir_label, 0, 0)
+        location_grid.addWidget(output_row, 0, 1)
+        location_body.addLayout(location_grid)
+        layout.addWidget(location_card)
 
+        format_card, format_body = self._build_card("输出格式")
         self.save_srt_checkbox = QCheckBox("保存 .srt")
         self.save_srt_checkbox.setChecked(True)
         self.save_lrc_checkbox = QCheckBox("纯音频保存 .lrc")
@@ -735,29 +963,37 @@ class MainWindow(QMainWindow):
         self.save_txt_checkbox = QCheckBox("保存 .txt")
         self.save_txt_checkbox.setChecked(True)
         self.save_json_checkbox = QCheckBox("保存 .json")
-        format_row = QWidget()
-        format_layout = QHBoxLayout(format_row)
-        format_layout.setContentsMargins(0, 0, 0, 0)
-        format_layout.addWidget(self.save_srt_checkbox)
-        format_layout.addWidget(self.save_lrc_checkbox)
-        format_layout.addWidget(self.save_txt_checkbox)
-        format_layout.addWidget(self.save_json_checkbox)
-        format_layout.addStretch(1)
+        format_grid = QGridLayout()
+        format_grid.setContentsMargins(0, 0, 0, 0)
+        format_grid.setHorizontalSpacing(16)
+        format_grid.setVerticalSpacing(12)
+        format_grid.addWidget(self.save_srt_checkbox, 0, 0)
+        format_grid.addWidget(self.save_lrc_checkbox, 0, 1)
+        format_grid.addWidget(self.save_txt_checkbox, 1, 0)
+        format_grid.addWidget(self.save_json_checkbox, 1, 1)
+        format_body.addLayout(format_grid)
+        layout.addWidget(format_card)
+        layout.addStretch(1)
+        return panel
 
-        layout.addWidget(QLabel("输出目录模式"), 0, 0)
-        layout.addWidget(self.output_mode_combo, 0, 1)
-        layout.addWidget(QLabel("指定输出目录"), 1, 0)
-        layout.addWidget(output_row, 1, 1)
-        layout.addWidget(format_row, 2, 0, 1, 2)
-        return group
+    def _build_preprocess_panel(self) -> QWidget:
+        panel, layout = self._create_settings_panel(
+            "预处理（VAD）",
+            "VAD 适合长音频和停顿明显的内容，能先切分音频再交给转写引擎处理。",
+        )
 
-    def _build_preprocess_group_inner(self) -> QGroupBox:
-        group = QGroupBox("预处理")
-        layout = QGridLayout(group)
+        intro_card, intro_body = self._build_card("功能说明")
+        self.ffmpeg_hint_label = QLabel("视频任务与 VAD 预切分会自动使用软件内置 ffmpeg，无需单独配置路径。")
+        self.ffmpeg_hint_label.setObjectName("mutedLabel")
+        self.ffmpeg_hint_label.setWordWrap(True)
+        intro_body.addWidget(self.ffmpeg_hint_label)
+        layout.addWidget(intro_card)
 
+        vad_card, vad_body = self._build_card("VAD 参数")
         self.enable_vad_checkbox = QCheckBox("启用 Silero VAD 预切分")
         self.enable_vad_checkbox.setChecked(False)
         self.enable_vad_checkbox.toggled.connect(self.on_vad_enabled_changed)
+        vad_grid = self._form_grid()
 
         self.vad_min_speech_spin = NoWheelSpinBox()
         self.vad_min_speech_spin.setRange(1, 60_000)
@@ -797,170 +1033,58 @@ class MainWindow(QMainWindow):
             self.vad_threshold_spin,
         ]
 
-        self.ffmpeg_hint_label = QLabel("视频任务与 VAD 预切分会自动使用软件内置 ffmpeg，无需单独设置。")
-        self.ffmpeg_hint_label.setWordWrap(True)
+        vad_grid.addWidget(self._field_label("最短语音"), 0, 0)
+        vad_grid.addWidget(self.vad_min_speech_spin, 0, 1)
+        vad_grid.addWidget(self._field_label("最短静音"), 1, 0)
+        vad_grid.addWidget(self.vad_min_silence_spin, 1, 1)
+        vad_grid.addWidget(self._field_label("语音补边"), 2, 0)
+        vad_grid.addWidget(self.vad_speech_pad_spin, 2, 1)
+        vad_grid.addWidget(self._field_label("单段最长时长"), 3, 0)
+        vad_grid.addWidget(self.vad_max_segment_spin, 3, 1)
+        vad_grid.addWidget(self._field_label("检测阈值"), 4, 0)
+        vad_grid.addWidget(self.vad_threshold_spin, 4, 1)
 
-        layout.addWidget(self.ffmpeg_hint_label, 0, 0, 1, 2)
-        layout.addWidget(self.enable_vad_checkbox, 1, 0, 1, 2)
-        layout.addWidget(QLabel("最短语音"), 2, 0)
-        layout.addWidget(self.vad_min_speech_spin, 2, 1)
-        layout.addWidget(QLabel("最短静音"), 3, 0)
-        layout.addWidget(self.vad_min_silence_spin, 3, 1)
-        layout.addWidget(QLabel("语音补边"), 4, 0)
-        layout.addWidget(self.vad_speech_pad_spin, 4, 1)
-        layout.addWidget(QLabel("单段最长时长"), 5, 0)
-        layout.addWidget(self.vad_max_segment_spin, 5, 1)
-        layout.addWidget(QLabel("检测阈值"), 6, 0)
-        layout.addWidget(self.vad_threshold_spin, 6, 1)
-        return group
+        vad_body.addWidget(self.enable_vad_checkbox)
+        vad_body.addLayout(vad_grid)
+        layout.addWidget(vad_card)
+        layout.addStretch(1)
+        return panel
 
     def _set_widgets_visible(self, widgets: List[QWidget], visible: bool) -> None:
         for widget in widgets:
             widget.setVisible(visible)
 
-    def _sync_mistral_api_key_inputs(self, text: str, source: QLineEdit) -> None:
-        if self._syncing_mistral_api_key:
-            return
-        self._syncing_mistral_api_key = True
-        try:
-            targets = [self.mistral_api_key_input, self.translation_mistral_api_key_input]
-            for target in targets:
-                if target is source or target.text() == text:
-                    continue
-                target.setText(text)
-        finally:
-            self._syncing_mistral_api_key = False
-
-    def on_transcription_mistral_key_changed(self, text: str) -> None:
-        self._sync_mistral_api_key_inputs(text, self.mistral_api_key_input)
-
-    def on_translation_mistral_key_changed(self, text: str) -> None:
-        self._sync_mistral_api_key_inputs(text, self.translation_mistral_api_key_input)
+    def _set_summary_state(self, state: str) -> None:
+        self.summary_label.setProperty("summaryState", state)
+        refresh_widget_style(self.summary_label)
 
     def refresh_settings_visibility(self) -> None:
         self.on_language_mode_changed()
         self.on_translation_mode_changed()
         self.on_transcription_provider_changed()
+        self.on_translation_thinking_changed()
+        self.on_segmentation_thinking_changed()
         self.on_timestamp_granularity_changed()
         self.on_intelligent_segmentation_changed()
         self.on_output_mode_changed()
         self.on_vad_enabled_changed()
 
-    def apply_style(self) -> None:
-        self.setStyleSheet(
-            """
-            QMainWindow, QWidget { background: #eef3f8; color: #1c2b39; }
-            QTabWidget::pane {
-                border: 1px solid #b8c7d9;
-                border-radius: 8px;
-                background: #eef3f8;
-                top: -1px;
-            }
-            QTabBar::tab {
-                background: #d9e6f3;
-                color: #1c2b39;
-                border: 1px solid #b8c7d9;
-                border-bottom: none;
-                border-top-left-radius: 7px;
-                border-top-right-radius: 7px;
-                padding: 8px 20px;
-                margin-right: 3px;
-                font-weight: 600;
-                font-size: 13px;
-            }
-            QTabBar::tab:selected {
-                background: #f9fbfd;
-                color: #1e2d3d;
-            }
-            QTabBar::tab:!selected:hover { background: #e6f0fa; }
-            QScrollArea, QScrollArea > QWidget > QWidget { background: #eef3f8; }
-            QGroupBox {
-                border: 1px solid #c5d2df;
-                border-radius: 10px;
-                margin-top: 10px;
-                padding: 14px 10px 10px 10px;
-                font-weight: 600;
-                background: #f9fbfd;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 6px;
-                color: #1e2d3d;
-            }
-            #dropFrame {
-                border: 2px dashed #4f83c2;
-                border-radius: 10px;
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f4f8fc, stop:1 #e1ecf8);
-                min-height: 72px;
-            }
-            QLabel { color: #1c2b39; }
-            QCheckBox { color: #1c2b39; background: transparent; spacing: 8px; padding: 3px 2px; }
-            QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #7f95ad; border-radius: 4px; background: white; }
-            QCheckBox::indicator:hover { border: 1px solid #2e78c7; }
-            QCheckBox::indicator:checked { background: #2e78c7; border: 1px solid #2e78c7; }
-            QCheckBox::indicator:checked:hover { background: #266ab1; border: 1px solid #266ab1; }
-            QCheckBox::indicator:disabled { background: #edf2f7; border: 1px solid #c5d2df; }
-            QCheckBox::indicator:checked:disabled { background: #9db5cc; border: 1px solid #9db5cc; }
-
-            QPushButton {
-                background: #2e78c7; color: white; border: none; border-radius: 7px;
-                padding: 7px 14px; font-weight: 600;
-            }
-            QPushButton:hover { background: #266ab1; }
-            QPushButton:disabled { background: #9db5cc; color: #ebf2f9; }
-            QPushButton#primaryBtn { background: #2563eb; padding: 8px 18px; font-size: 13px; }
-            QPushButton#primaryBtn:hover { background: #1d4ed8; }
-            QPushButton#dangerBtn { background: #dc2626; }
-            QPushButton#dangerBtn:hover { background: #b91c1c; }
-            QPushButton#dangerBtn:disabled { background: #f3a0a0; color: #fef2f2; }
-            QPushButton#warningBtn { background: #d97706; }
-            QPushButton#warningBtn:hover { background: #b45309; }
-            QPushButton#secondaryBtn { background: #64748b; }
-            QPushButton#secondaryBtn:hover { background: #475569; }
-
-            QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-                border: 1px solid #b4c4d4; border-radius: 6px; padding: 5px; background: white; color: #1c2b39;
-            }
-            QLineEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {
-                background: #edf2f7; color: #68798a; border: 1px solid #c5d2df;
-            }
-            QComboBox::drop-down, QSpinBox::up-button, QSpinBox::down-button,
-            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
-                border-left: 1px solid #b4c4d4; background: #eef3f8; width: 22px;
-            }
-            QComboBox QAbstractItemView {
-                background: white; color: #1c2b39; selection-background-color: #d9e6f3;
-                selection-color: #1c2b39; border: 1px solid #b4c4d4;
-            }
-            QTableWidget {
-                border: 1px solid #b8c7d9; border-radius: 8px;
-                background: white; alternate-background-color: #f4f7fb;
-                gridline-color: #d9e2ec;
-            }
-            QTableWidget::item { padding: 4px 6px; }
-            QHeaderView::section {
-                background: #d0ddf0; padding: 7px 6px; border: none;
-                border-right: 1px solid #bfd0e1; color: #1a2a3a; font-weight: 700;
-            }
-            QProgressBar {
-                border: 1px solid #9eb4c8; border-radius: 6px;
-                text-align: center; background: #f4f8fc; font-weight: 600; font-size: 11px;
-            }
-            QProgressBar::chunk { background: #3b82f6; border-radius: 5px; }
-            QMenu {
-                background: white; border: 1px solid #b8c7d9; border-radius: 6px;
-                padding: 4px 0px; color: #1c2b39;
-            }
-            QMenu::item { padding: 6px 24px 6px 12px; }
-            QMenu::item:selected { background: #d9e6f3; color: #1a2a3a; }
-            QMenu::item:disabled { color: #9ca3af; }
-            """
-        )
-        self.setFont(QFont("Segoe UI", 10))
+    def apply_style(self, theme_name: str | None = None) -> None:
+        if theme_name:
+            self._palette = ThemeManager.palette(theme_name)
+        app = QApplication.instance()
+        if app is not None:
+            self._palette = ThemeManager.apply_theme(app, self._palette.name)
+        self._set_summary_state(str(self.summary_label.property("summaryState") or "idle"))
 
     def log(self, message: str) -> None:
         self.log_text.appendPlainText(message)
+        if self.log_autoscroll_checkbox.isChecked():
+            scrollbar = self.log_text.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
+    def on_clear_log(self) -> None:
+        self.log_text.clear()
 
     def load_settings_into_ui(self) -> None:
         settings = load_settings()
@@ -969,12 +1093,14 @@ class MainWindow(QMainWindow):
         self.refresh_settings_visibility()
 
     def apply_settings_to_ui(self, settings: AppSettings) -> None:
+        theme_index = {"light": 0, "dark": 1}.get(settings.ui_theme, 0)
+        self.theme_combo.setCurrentIndex(theme_index)
+
         provider_index = {"mistral": 0, "whisper_openai_compatible": 1, "qwen3asr": 2}.get(
             settings.transcription.provider, 0
         )
         self.transcription_provider_combo.setCurrentIndex(provider_index)
         self.mistral_api_key_input.setText(settings.transcription.mistral.api_key)
-        self.translation_mistral_api_key_input.setText(settings.transcription.mistral.api_key)
         self.mistral_model_combo.setCurrentText(settings.transcription.mistral.model)
         self.whisper_base_url_input.setText(settings.transcription.whisper.base_url)
         self.whisper_api_key_input.setText(settings.transcription.whisper.api_key)
@@ -984,13 +1110,20 @@ class MainWindow(QMainWindow):
         self.language_mode_combo.setCurrentIndex(1 if settings.transcription.language_mode == "manual" else 0)
         self.language_input.setText(settings.transcription.language)
         self.timestamp_combo.setCurrentText(settings.transcription.timestamp_granularity)
+        self.diarize_checkbox.setChecked(settings.transcription.diarize)
+        self.thread_spin.setValue(settings.transcription.thread_count)
+        self.max_retries_spin.setValue(settings.transcription.max_retries)
+        self.retry_base_delay_spin.setValue(settings.retry_base_delay)
+        self.context_bias_input.setPlainText(settings.transcription.context_bias)
+
         self.enable_segmentation_checkbox.setChecked(settings.segmentation.enabled)
         self.segmentation_base_url_input.setText(settings.segmentation.openai_base_url)
         self.segmentation_api_key_input.setText(settings.segmentation.openai_api_key)
         self.segmentation_model_input.setText(settings.segmentation.model)
-        self.diarize_checkbox.setChecked(settings.transcription.diarize)
-        self.thread_spin.setValue(settings.transcription.thread_count)
-        self.context_bias_input.setPlainText(settings.transcription.context_bias)
+        self.segmentation_thinking_checkbox.setChecked(settings.segmentation.thinking_enabled)
+        self.segmentation_reasoning_effort_combo.setCurrentText(settings.segmentation.reasoning_effort)
+        self.segmentation_temperature_spin.setValue(settings.segmentation.temperature)
+        self.segmentation_window_spin.setValue(settings.segmentation.max_words_per_window)
 
         self.translation_mode_combo.setCurrentIndex({"none": 0, "mistral": 1, "openai": 2}.get(settings.translation.mode, 0))
         self.translation_target_input.setText(settings.translation.target_language)
@@ -999,10 +1132,12 @@ class MainWindow(QMainWindow):
         self.translation_keep_original_checkbox.setChecked(settings.translation.keep_original_srt)
         self.allow_subtitle_import_checkbox.setChecked(settings.translation.allow_subtitle_import)
         self.subtitle_translation_thread_spin.setValue(settings.translation.subtitle_translation_thread_count)
-        self.translation_openai_base_input.setText(settings.translation.openai_base_url)
-        self.translation_openai_key_input.setText(settings.translation.openai_api_key)
         self.translation_thinking_checkbox.setChecked(settings.translation.thinking_enabled)
         self.translation_reasoning_effort_combo.setCurrentText(settings.translation.reasoning_effort)
+        self.translation_temperature_spin.setValue(settings.translation.temperature)
+        self.translation_chunk_size_spin.setValue(settings.translation.chunk_size)
+        self.translation_openai_base_input.setText(settings.translation.openai_base_url)
+        self.translation_openai_key_input.setText(settings.translation.openai_api_key)
 
         self.output_mode_combo.setCurrentIndex(1 if settings.output.mode == "custom" else 0)
         self.output_dir_input.setText(str(settings.output.output_dir))
@@ -1010,6 +1145,7 @@ class MainWindow(QMainWindow):
         self.save_lrc_checkbox.setChecked(settings.output.save_lrc)
         self.save_txt_checkbox.setChecked(settings.output.save_txt)
         self.save_json_checkbox.setChecked(settings.output.save_json)
+
         self.enable_vad_checkbox.setChecked(settings.vad.enabled)
         self.vad_min_speech_spin.setValue(settings.vad.min_speech_ms)
         self.vad_min_silence_spin.setValue(settings.vad.min_silence_ms)
@@ -1019,6 +1155,9 @@ class MainWindow(QMainWindow):
 
     def collect_settings_from_ui(self) -> AppSettings:
         settings = AppSettings()
+        settings.ui_theme = self.theme_combo.currentData() or "light"
+        settings.retry_base_delay = self.retry_base_delay_spin.value()
+
         settings.transcription.provider = self.transcription_provider_combo.currentData()
         settings.transcription.mistral.api_key = self.mistral_api_key_input.text().strip()
         settings.transcription.mistral.model = self.mistral_model_combo.currentText().strip() or "voxtral-mini-latest"
@@ -1032,12 +1171,17 @@ class MainWindow(QMainWindow):
         settings.transcription.timestamp_granularity = self.timestamp_combo.currentText().strip() or "none"
         settings.transcription.diarize = self.diarize_checkbox.isChecked()
         settings.transcription.thread_count = self.thread_spin.value()
+        settings.transcription.max_retries = self.max_retries_spin.value()
         settings.transcription.context_bias = parse_context_bias(self.context_bias_input.toPlainText())
 
         settings.segmentation.enabled = self.enable_segmentation_checkbox.isChecked()
         settings.segmentation.openai_base_url = self.segmentation_base_url_input.text().strip() or "https://api.openai.com/v1"
         settings.segmentation.openai_api_key = self.segmentation_api_key_input.text().strip()
         settings.segmentation.model = self.segmentation_model_input.text().strip() or "gpt-4o-mini"
+        settings.segmentation.thinking_enabled = self.segmentation_thinking_checkbox.isChecked()
+        settings.segmentation.reasoning_effort = self.segmentation_reasoning_effort_combo.currentData() or "high"
+        settings.segmentation.temperature = self.segmentation_temperature_spin.value()
+        settings.segmentation.max_words_per_window = self.segmentation_window_spin.value()
 
         settings.translation.mode = self.translation_mode_combo.currentData()
         settings.translation.target_language = normalize_language_code(self.translation_target_input.text().strip())
@@ -1046,10 +1190,12 @@ class MainWindow(QMainWindow):
         settings.translation.keep_original_srt = self.translation_keep_original_checkbox.isChecked()
         settings.translation.allow_subtitle_import = self.allow_subtitle_import_checkbox.isChecked()
         settings.translation.subtitle_translation_thread_count = self.subtitle_translation_thread_spin.value()
-        settings.translation.openai_base_url = self.translation_openai_base_input.text().strip() or "https://api.openai.com/v1"
-        settings.translation.openai_api_key = self.translation_openai_key_input.text().strip()
         settings.translation.thinking_enabled = self.translation_thinking_checkbox.isChecked()
         settings.translation.reasoning_effort = self.translation_reasoning_effort_combo.currentData() or "high"
+        settings.translation.temperature = self.translation_temperature_spin.value()
+        settings.translation.chunk_size = self.translation_chunk_size_spin.value()
+        settings.translation.openai_base_url = self.translation_openai_base_input.text().strip() or "https://api.openai.com/v1"
+        settings.translation.openai_api_key = self.translation_openai_key_input.text().strip()
 
         settings.output.mode = self.output_mode_combo.currentData()
         settings.output.output_dir = Path(self.output_dir_input.text().strip() or str(Path.cwd() / "subtitles"))
@@ -1075,14 +1221,22 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "保存失败", f"无法保存设置：{exc}")
 
+    def on_theme_changed(self) -> None:
+        self.apply_style(self.theme_combo.currentData() or "light")
+
     def on_transcription_provider_changed(self) -> None:
+        if not hasattr(self, "transcription_provider_buttons"):
+            return
         provider = self.transcription_provider_combo.currentData()
-        translation_mode = self.translation_mode_combo.currentData()
+        translation_mode = self.translation_mode_combo.currentData() if hasattr(self, "translation_mode_combo") else "none"
         use_mistral = provider == "mistral"
         use_whisper = provider == "whisper_openai_compatible"
         use_qwen3asr = provider == "qwen3asr"
         show_mistral_key = use_mistral or translation_mode == "mistral"
 
+        self._sync_choice_buttons(self.transcription_provider_combo, self.transcription_provider_buttons)
+        if not hasattr(self, "transcription_mistral_key_widgets"):
+            return
         self._set_widgets_visible(self.transcription_mistral_key_widgets, show_mistral_key)
         self._set_widgets_visible(self.transcription_mistral_only_widgets, use_mistral)
         self._set_widgets_visible(self.transcription_whisper_widgets, use_whisper)
@@ -1104,13 +1258,18 @@ class MainWindow(QMainWindow):
         self.on_intelligent_segmentation_changed()
 
     def on_translation_mode_changed(self) -> None:
+        if not hasattr(self, "translation_mode_buttons"):
+            return
         mode = self.translation_mode_combo.currentData()
         enable_translation = mode != "none"
         use_mistral = mode == "mistral"
         use_openai = mode == "openai"
-        current_model = self.translation_model_input.text().strip()
+        current_model = self.translation_model_input.text().strip() if hasattr(self, "translation_model_input") else ""
 
-        self._set_widgets_visible(self.translation_common_widgets, enable_translation)
+        self._sync_choice_buttons(self.translation_mode_combo, self.translation_mode_buttons)
+        if not hasattr(self, "translation_common_cards"):
+            return
+        self._set_widgets_visible(self.translation_common_cards, enable_translation)
         self._set_widgets_visible(self.translation_mistral_widgets, use_mistral)
         self._set_widgets_visible(self.translation_openai_widgets, use_openai)
 
@@ -1121,10 +1280,6 @@ class MainWindow(QMainWindow):
         self.allow_subtitle_import_checkbox.setEnabled(enable_translation)
         self.subtitle_translation_thread_spin.setEnabled(enable_translation)
         self.translation_thinking_checkbox.setEnabled(enable_translation)
-        self.translation_reasoning_effort_combo.setEnabled(enable_translation)
-        self.translation_reasoning_effort_label.setEnabled(enable_translation)
-        self.translation_mistral_api_key_input.setEnabled(use_mistral)
-        self.show_translation_mistral_key_checkbox.setEnabled(use_mistral)
         self.translation_openai_base_input.setEnabled(use_openai)
         self.translation_openai_key_input.setEnabled(use_openai)
         self.show_translation_openai_key_checkbox.setEnabled(use_openai)
@@ -1133,9 +1288,38 @@ class MainWindow(QMainWindow):
             self.translation_model_input.setText("mistral-small-latest")
         if mode == "openai" and current_model in {"", "mistral-small-latest"}:
             self.translation_model_input.setText("gpt-4o-mini")
+        self.on_translation_thinking_changed()
         self.on_transcription_provider_changed()
 
+    def on_translation_thinking_changed(self) -> None:
+        if not hasattr(self, "translation_reasoning_effort_combo"):
+            return
+        enable_translation = self.translation_mode_combo.currentData() != "none"
+        thinking_enabled = self.translation_thinking_checkbox.isChecked()
+        self.translation_reasoning_effort_combo.setEnabled(enable_translation and thinking_enabled)
+        self.translation_reasoning_effort_label.setEnabled(enable_translation and thinking_enabled)
+        self.translation_temperature_spin.setEnabled(enable_translation and not thinking_enabled)
+        self.translation_temperature_label.setEnabled(enable_translation and not thinking_enabled)
+        self.translation_chunk_size_spin.setEnabled(enable_translation)
+        self.translation_chunk_size_label.setEnabled(enable_translation)
+
+    def on_segmentation_thinking_changed(self) -> None:
+        if not hasattr(self, "segmentation_reasoning_effort_combo"):
+            return
+        eligible = (
+            self.enable_segmentation_checkbox.isChecked()
+            and self.timestamp_combo.currentText().strip() == "word"
+            and self.transcription_provider_combo.currentData() != "qwen3asr"
+        )
+        thinking_enabled = self.segmentation_thinking_checkbox.isChecked()
+        self.segmentation_reasoning_effort_combo.setEnabled(eligible and thinking_enabled)
+        self.segmentation_reasoning_effort_label.setEnabled(eligible and thinking_enabled)
+        self.segmentation_temperature_spin.setEnabled(eligible and not thinking_enabled)
+        self.segmentation_temperature_label.setEnabled(eligible and not thinking_enabled)
+
     def on_language_mode_changed(self) -> None:
+        if not hasattr(self, "language_input"):
+            return
         manual = self.language_mode_combo.currentIndex() == 1
         self.language_input.setEnabled(manual)
         if manual:
@@ -1147,6 +1331,8 @@ class MainWindow(QMainWindow):
         self.on_intelligent_segmentation_changed()
 
     def on_intelligent_segmentation_changed(self) -> None:
+        if not hasattr(self, "segmentation_config_widgets"):
+            return
         enabled = self.enable_segmentation_checkbox.isChecked()
         provider = self.transcription_provider_combo.currentData()
         timestamp_granularity = self.timestamp_combo.currentText().strip()
@@ -1164,13 +1350,20 @@ class MainWindow(QMainWindow):
         self._set_widgets_visible(self.segmentation_config_widgets, enabled)
         for widget in self.segmentation_config_widgets:
             widget.setEnabled(enabled and eligible)
+        self.on_segmentation_thinking_changed()
 
     def on_output_mode_changed(self) -> None:
+        if not hasattr(self, "output_mode_buttons"):
+            return
+        self._sync_choice_buttons(self.output_mode_combo, self.output_mode_buttons)
         custom = self.output_mode_combo.currentData() == "custom"
         self.output_dir_input.setEnabled(custom)
         self.output_btn.setEnabled(custom)
+        self.output_dir_label.setEnabled(custom)
 
     def on_vad_enabled_changed(self) -> None:
+        if not hasattr(self, "vad_controls"):
+            return
         enabled = self.enable_vad_checkbox.isChecked()
         for widget in self.vad_controls:
             widget.setEnabled(enabled)
@@ -1230,12 +1423,14 @@ class MainWindow(QMainWindow):
                 continue
             self.task_table.insertRow(row)
             self.task_table.setItem(row, 0, QTableWidgetItem(str(path)))
-            status_item = QTableWidgetItem("排队中")
+            status_item = QTableWidgetItem(f"● {STATUS_LABELS.get('Queued', '排队中')}")
             status_item.setForeground(QColor(STATUS_COLORS.get("Queued", "#6b7280")))
             self.task_table.setItem(row, 1, status_item)
             progress_bar = QProgressBar()
+            progress_bar.setObjectName("tableProgress")
             progress_bar.setRange(0, 100)
             progress_bar.setValue(0)
+            progress_bar.setTextVisible(False)
             self.task_table.setCellWidget(row, 2, progress_bar)
             self.task_table.setItem(row, 3, QTableWidgetItem("-"))
             self.task_table.setItem(row, 4, QTableWidgetItem("-"))
@@ -1246,10 +1441,6 @@ class MainWindow(QMainWindow):
         if skipped_subtitle > 0 and not allow_subtitle_import:
             self.log(f"已忽略 {skipped_subtitle} 个字幕文件（导入开关已关闭）")
         self._update_summary()
-
-    # ──────────────────────────────────────────────────────────
-    #  任务操作
-    # ──────────────────────────────────────────────────────────
 
     def on_remove_selected(self) -> None:
         if self.qm.is_running:
@@ -1306,16 +1497,23 @@ class MainWindow(QMainWindow):
         has_subtitle = any(self.qm.tasks[tid].source_path.suffix.lower() in SUBTITLE_EXTENSIONS for tid in run_ids)
         has_video = any(self.qm.tasks[tid].source_path.suffix.lower() in VIDEO_EXTENSIONS for tid in run_ids)
         if (has_video or settings.vad.enabled) and not has_ffmpeg():
-            QMessageBox.warning(self, "缺少 ffmpeg",
-                "视频任务或 VAD 预切分需要 ffmpeg。当前运行环境未检测到内置或可用的 ffmpeg。")
+            QMessageBox.warning(
+                self,
+                "缺少 ffmpeg",
+                "视频任务或 VAD 预切分需要 ffmpeg。当前运行环境未检测到内置或可用的 ffmpeg。",
+            )
             return
         if has_subtitle and settings.translation.mode == "none":
             QMessageBox.warning(self, "翻译未启用", "导入字幕任务需要启用翻译模式")
             return
         if has_subtitle and not settings.translation.allow_subtitle_import:
-            QMessageBox.warning(self, "字幕导入已关闭", "请在设置中开启\u201c允许导入字幕文件并翻译\u201d")
+            QMessageBox.warning(self, "字幕导入已关闭", "请在设置中开启“允许导入字幕文件并翻译”")
             return
-        if settings.transcription.provider == "mistral" and settings.transcription.timestamp_granularity != "none" and settings.transcription.language_mode == "manual":
+        if (
+            settings.transcription.provider == "mistral"
+            and settings.transcription.timestamp_granularity != "none"
+            and settings.transcription.language_mode == "manual"
+        ):
             self.log("Mistral 启用时间戳粒度后，language 参数将被忽略")
 
         count = self.qm.start_batch(settings)
@@ -1352,10 +1550,6 @@ class MainWindow(QMainWindow):
         self.total_progress.setValue(0)
         self._update_summary()
 
-    # ──────────────────────────────────────────────────────────
-    #  单任务操作（暂停/恢复/取消/重试）
-    # ──────────────────────────────────────────────────────────
-
     def _pause_selected(self) -> None:
         for row in {idx.row() for idx in self.task_table.selectionModel().selectedRows()}:
             tid = self.qm.get_task_id_by_row(row)
@@ -1387,10 +1581,6 @@ class MainWindow(QMainWindow):
             self.log(f"已重置 {len(reset)} 个任务为排队状态")
             self._update_summary()
 
-    # ──────────────────────────────────────────────────────────
-    #  右键菜单
-    # ──────────────────────────────────────────────────────────
-
     def _build_context_menu(self, menu: QMenu) -> None:
         rows = {idx.row() for idx in self.task_table.selectionModel().selectedRows()}
         if not rows:
@@ -1401,21 +1591,21 @@ class MainWindow(QMainWindow):
             tid = self.qm.get_task_id_by_row(row)
             if not tid:
                 continue
-            s = self.qm.tasks[tid].status
-            if s in {"Preparing", "Extracting", "Transcribing", "Translating", "Writing", "Queued"}:
+            status = self.qm.tasks[tid].status
+            if status in {"Preparing", "Extracting", "Transcribing", "Translating", "Writing", "Queued"}:
                 has_running = True
-            if s == "Paused":
+            if status == "Paused":
                 has_paused = True
-            if s in {"Failed", "Cancelled"}:
+            if status in {"Failed", "Cancelled"}:
                 has_failed = True
 
         if has_running:
             menu.addAction("取消所选任务", self._cancel_selected)
-            menu.addAction("\u23f8 暂停所选任务", self._pause_selected)
+            menu.addAction("⏸ 暂停所选任务", self._pause_selected)
         if has_paused:
-            menu.addAction("\u25b6 恢复所选任务", self._resume_selected)
+            menu.addAction("▶ 恢复所选任务", self._resume_selected)
         if has_failed:
-            menu.addAction("\u21bb 重试所选任务", self._retry_selected)
+            menu.addAction("↻ 重试所选任务", self._retry_selected)
 
         menu.addSeparator()
         selected_tids = self.qm.get_selected_task_ids(list(rows))
@@ -1425,10 +1615,6 @@ class MainWindow(QMainWindow):
         if not self.qm.is_running:
             menu.addSeparator()
             menu.addAction("删除所选", self.on_remove_selected)
-
-    # ──────────────────────────────────────────────────────────
-    #  拖拽排序
-    # ──────────────────────────────────────────────────────────
 
     def _on_table_reorder(self) -> None:
         ordered: List[str] = []
@@ -1443,10 +1629,6 @@ class MainWindow(QMainWindow):
             self.qm.reorder_by_rows(ordered)
         self._rebuild_row_mapping()
 
-    # ──────────────────────────────────────────────────────────
-    #  表格行更新
-    # ──────────────────────────────────────────────────────────
-
     def _update_task_row(self, task_id: str, status: str, progress: int, message: str, outputs: str = "-") -> None:
         state = self.qm.tasks.get(task_id)
         if not state:
@@ -1455,30 +1637,25 @@ class MainWindow(QMainWindow):
         if row >= self.task_table.rowCount():
             return
 
-        # 状态列（带颜色）
         status_item = self.task_table.item(row, 1)
         if status_item:
-            status_item.setText(STATUS_LABELS.get(status, status))
+            status_item.setText(f"● {STATUS_LABELS.get(status, status)}")
             status_item.setForeground(QColor(STATUS_COLORS.get(status, "#6b7280")))
 
-        # 进度列
         progress_bar = self.task_table.cellWidget(row, 2)
         if isinstance(progress_bar, QProgressBar):
             progress_bar.setValue(progress)
 
-        # 耗时列
         if state.start_time > 0:
             end = state.end_time if state.end_time > 0 else time.monotonic()
             elapsed_item = self.task_table.item(row, 3)
             if elapsed_item:
                 elapsed_item.setText(self._format_duration(end - state.start_time))
 
-        # 输出列
         out_item = self.task_table.item(row, 4)
         if out_item:
             out_item.setText(outputs)
 
-        # 消息列
         msg_item = self.task_table.item(row, 5)
         if msg_item:
             display = message if len(message) <= 80 else message[:80] + "..."
@@ -1489,13 +1666,9 @@ class MainWindow(QMainWindow):
     def _format_duration(seconds: float) -> str:
         if seconds <= 0:
             return "-"
-        m, s = divmod(int(seconds), 60)
-        h, m = divmod(m, 60)
-        return f"{h}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
-
-    # ──────────────────────────────────────────────────────────
-    #  QueueManager 信号处理
-    # ──────────────────────────────────────────────────────────
+        minutes, secs = divmod(int(seconds), 60)
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}:{minutes:02d}:{secs:02d}" if hours > 0 else f"{minutes:02d}:{secs:02d}"
 
     def on_task_progress(self, task_id: str, status: str, progress: int, message: str) -> None:
         self._update_task_row(task_id, status, progress, message)
@@ -1525,32 +1698,35 @@ class MainWindow(QMainWindow):
                 if item:
                     item.setText(self._format_duration(time.monotonic() - state.start_time))
 
-    # ──────────────────────────────────────────────────────────
-    #  摘要 & 按钮状态
-    # ──────────────────────────────────────────────────────────
-
     def _update_summary(self) -> None:
-        s = self.qm.get_summary()
-        total = s["total"]
+        summary = self.qm.get_summary()
+        total = summary["total"]
         if total == 0:
             self.summary_label.setText("暂无任务")
-            self.summary_label.setStyleSheet("font-weight: 600; color: #374151;")
+            self._set_summary_state("idle")
             return
+
         if self.qm.is_running:
-            done_batch = s["done"] + s["failed"] + s["canceled"]
+            done_batch = summary["done"] + summary["failed"] + summary["canceled"]
             self.summary_label.setText(
-                f"当前批次：已完成 {done_batch}/{total} | 运行中={s['running']} | 暂停={s['paused']}"
+                f"当前批次：已完成 {done_batch}/{total} | 运行中={summary['running']} | 暂停={summary['paused']}"
             )
-            self.summary_label.setStyleSheet("font-weight: 600; color: #2563eb;")
+            self._set_summary_state("running")
+            return
+
+        parts = [f"总数={total}", f"排队={summary['queued']}", f"完成={summary['done']}"]
+        if summary["failed"] > 0:
+            parts.append(f"失败={summary['failed']}")
+        if summary["canceled"] > 0:
+            parts.append(f"取消={summary['canceled']}")
+        self.summary_label.setText(" | ".join(parts))
+
+        if summary["failed"] > 0:
+            self._set_summary_state("error")
+        elif summary["done"] > 0 and summary["queued"] == 0:
+            self._set_summary_state("done")
         else:
-            parts = [f"总数={total}", f"排队={s['queued']}", f"完成={s['done']}"]
-            if s["failed"] > 0:
-                parts.append(f"失败={s['failed']}")
-            if s["canceled"] > 0:
-                parts.append(f"取消={s['canceled']}")
-            self.summary_label.setText(" | ".join(parts))
-            color = "#dc2626" if s["failed"] > 0 else "#374151"
-            self.summary_label.setStyleSheet(f"font-weight: 600; color: {color};")
+            self._set_summary_state("idle")
 
     def _update_button_states(self) -> None:
         running = self.qm.is_running
@@ -1561,10 +1737,6 @@ class MainWindow(QMainWindow):
         self.remove_btn.setEnabled(not running)
         self.clear_btn.setEnabled(not running)
         self.retry_btn.setEnabled(not running and bool(self.qm.get_failed_task_ids()))
-
-    # ──────────────────────────────────────────────────────────
-    #  输出目录 & 日志
-    # ──────────────────────────────────────────────────────────
 
     def on_open_output_dir(self) -> None:
         if self.output_mode_combo.currentData() == "source":
@@ -1584,35 +1756,50 @@ class MainWindow(QMainWindow):
             os.startfile(str(folder))  # type: ignore[attr-defined]
         elif sys.platform == "darwin":
             import subprocess
+
             subprocess.Popen(["open", str(folder)])
         else:
             import subprocess
-            subprocess.Popen(["xdg-open", str(folder)])
 
-    # ──────────────────────────────────────────────────────────
-    #  设置验证
-    # ──────────────────────────────────────────────────────────
+            subprocess.Popen(["xdg-open", str(folder)])
 
     def _validate_settings(self) -> AppSettings:
         settings = self.collect_settings_from_ui()
-        if settings.transcription.language_mode == "manual" and not settings.transcription.language:
-            raise RuntimeError("已选择指定语言，请填写有效语言代码，例如 zh / en")
+
+        if settings.transcription.language_mode == "manual":
+            if not settings.transcription.language:
+                raise RuntimeError("已选择指定语言，请填写有效语言代码，例如 zh / en")
+            if not is_valid_language_code(settings.transcription.language):
+                raise RuntimeError("指定语言格式无效，请使用 2-3 位语言代码，例如 zh / en / ja")
+
         if settings.translation.mode != "none":
             if not settings.translation.target_language:
                 raise RuntimeError("请填写目标语言代码，例如 zh / en / ja")
+            if not is_valid_language_code(settings.translation.target_language):
+                raise RuntimeError("目标语言格式无效，请使用 2-3 位语言代码，例如 zh / en / ja")
             if not settings.translation.model:
                 raise RuntimeError("请填写翻译模型名称")
-        if settings.translation.mode == "openai" and not settings.translation.openai_api_key:
-            raise RuntimeError("OpenAI 兼容翻译模式需要填写 API Key")
+
+        if settings.translation.mode == "openai":
+            if not settings.translation.openai_api_key:
+                raise RuntimeError("OpenAI 兼容翻译模式需要填写 API Key")
+            if not is_valid_http_url(settings.translation.openai_base_url):
+                raise RuntimeError("OpenAI 兼容翻译模式的 Base URL 无效，请填写 http/https 地址")
+
         if settings.translation.mode == "mistral" and not settings.transcription.mistral.api_key:
             raise RuntimeError("Mistral 翻译模式需要填写 MISTRAL_API_KEY")
+
         if settings.transcription.provider == "mistral" and not settings.transcription.mistral.api_key:
             raise RuntimeError("Mistral 转写需要填写 MISTRAL_API_KEY")
+
         if settings.transcription.provider == "whisper_openai_compatible":
             if not settings.transcription.whisper.api_key:
                 raise RuntimeError("Whisper 转写需要填写第三方/OpenAI 兼容 API Key")
             if not settings.transcription.whisper.model:
                 raise RuntimeError("Whisper 转写需要填写模型名称")
+            if not is_valid_http_url(settings.transcription.whisper.base_url):
+                raise RuntimeError("Whisper Base URL 无效，请填写 http/https 地址")
+
         if settings.segmentation.enabled:
             if settings.transcription.timestamp_granularity != "word":
                 raise RuntimeError("启用智能分段时，时间戳粒度必须为 word")
@@ -1620,14 +1807,22 @@ class MainWindow(QMainWindow):
                 raise RuntimeError("Qwen3 ASR 当前不支持词级时间戳，无法使用智能分段")
             if not settings.segmentation.openai_base_url:
                 raise RuntimeError("请填写智能分段专用 API 的 Base URL")
+            if not is_valid_http_url(settings.segmentation.openai_base_url):
+                raise RuntimeError("智能分段 Base URL 无效，请填写 http/https 地址")
             if not settings.segmentation.openai_api_key:
                 raise RuntimeError("请填写智能分段专用 API 的 API Key")
             if not settings.segmentation.model:
                 raise RuntimeError("请填写智能分段模型名称")
+
         if not (settings.output.save_srt or settings.output.save_lrc or settings.output.save_txt or settings.output.save_json):
             raise RuntimeError("请至少选择一种输出格式")
+
         if settings.output.mode == "custom":
-            settings.output.output_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                settings.output.output_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                raise RuntimeError(f"输出目录不可用：{exc}") from exc
+
         if settings.transcription.provider == "mistral" and transcription_provider.Mistral is None:
             details = ""
             if transcription_provider._MISTRAL_IMPORT_ERROR is not None:
@@ -1635,6 +1830,12 @@ class MainWindow(QMainWindow):
                     f"（导入错误：{type(transcription_provider._MISTRAL_IMPORT_ERROR).__name__}: "
                     f"{transcription_provider._MISTRAL_IMPORT_ERROR}）"
                 )
-            raise RuntimeError(f"缺少依赖：mistral{details}")
-        return settings
+            raise RuntimeError(f"缺少依赖：mistralai{details}")
 
+        model_name = settings.translation.model.lower().strip()
+        if settings.translation.mode == "mistral" and model_name.startswith(("gpt", "o1", "deepseek", "qwen")):
+            self.log("提示：当前翻译模式为 Mistral，但模型名看起来更像 OpenAI 兼容模型，请确认接口选择无误。")
+        if settings.translation.mode == "openai" and model_name.startswith("mistral"):
+            self.log("提示：当前翻译模式为 OpenAI 兼容，但模型名看起来像 Mistral 模型，请确认接口选择无误。")
+
+        return settings

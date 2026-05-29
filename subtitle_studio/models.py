@@ -43,6 +43,7 @@ class TranscriptionSettings:
     diarize: bool = False
     context_bias: str = ""
     thread_count: int = 3
+    max_retries: int = 3
     mistral: MistralProviderSettings = field(default_factory=MistralProviderSettings)
     whisper: WhisperProviderSettings = field(default_factory=WhisperProviderSettings)
     qwen3asr: Qwen3ASRProviderSettings = field(default_factory=Qwen3ASRProviderSettings)
@@ -61,6 +62,8 @@ class TranslationSettings:
     subtitle_translation_thread_count: int = 3
     thinking_enabled: bool = False
     reasoning_effort: str = "high"
+    temperature: float = 0.2
+    chunk_size: int = 40
 
 
 @dataclass
@@ -69,6 +72,10 @@ class SegmentationSettings:
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str = ""
     model: str = "gpt-4o-mini"
+    temperature: float = 0.1
+    max_words_per_window: int = 180
+    thinking_enabled: bool = False
+    reasoning_effort: str = "high"
 
 
 @dataclass
@@ -93,6 +100,8 @@ class VadSettings:
 
 @dataclass
 class AppSettings:
+    ui_theme: str = "light"
+    retry_base_delay: float = 2.0
     transcription: TranscriptionSettings = field(default_factory=TranscriptionSettings)
     translation: TranslationSettings = field(default_factory=TranslationSettings)
     segmentation: SegmentationSettings = field(default_factory=SegmentationSettings)

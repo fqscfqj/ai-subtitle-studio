@@ -35,11 +35,20 @@ class SettingsCompatibilityTests(unittest.TestCase):
     def test_serialize_roundtrip_contains_new_fields(self) -> None:
         settings = deserialize_settings(
             {
+                "ui_theme": "dark",
+                "task_retry_base_delay": 1.5,
+                "task_max_retries": 5,
                 "transcription_provider": "whisper_openai_compatible",
+                "translation_temperature": 0.8,
+                "translation_chunk_size": 24,
                 "segmentation_enabled": True,
                 "segmentation_openai_base": "https://segment.example.com/v1",
                 "segmentation_openai_key": "segment-key",
                 "segmentation_model": "segment-model",
+                "segmentation_temperature": 0.35,
+                "segmentation_max_words_per_window": 220,
+                "segmentation_thinking_enabled": True,
+                "segmentation_reasoning_effort": "max",
                 "ffmpeg_path": "C:/tools/ffmpeg.exe",
                 "vad_min_speech_ms": 320,
                 "vad_min_silence_ms": 520,
@@ -49,14 +58,26 @@ class SettingsCompatibilityTests(unittest.TestCase):
             }
         )
         payload = serialize_settings(settings)
+        self.assertEqual(settings.ui_theme, "dark")
+        self.assertEqual(settings.retry_base_delay, 1.5)
+        self.assertEqual(settings.transcription.max_retries, 5)
         self.assertIn("transcription_provider", payload)
+        self.assertIn("ui_theme", payload)
+        self.assertIn("task_retry_base_delay", payload)
+        self.assertIn("task_max_retries", payload)
         self.assertIn("whisper_base_url", payload)
         self.assertIn("whisper_api_key", payload)
         self.assertIn("whisper_model", payload)
+        self.assertIn("translation_temperature", payload)
+        self.assertIn("translation_chunk_size", payload)
         self.assertIn("segmentation_enabled", payload)
         self.assertIn("segmentation_openai_base", payload)
         self.assertIn("segmentation_openai_key", payload)
         self.assertIn("segmentation_model", payload)
+        self.assertIn("segmentation_temperature", payload)
+        self.assertIn("segmentation_max_words_per_window", payload)
+        self.assertIn("segmentation_thinking_enabled", payload)
+        self.assertIn("segmentation_reasoning_effort", payload)
         self.assertIn("silero_vad_enabled", payload)
         self.assertIn("vad_min_speech_ms", payload)
         self.assertIn("vad_min_silence_ms", payload)
@@ -65,9 +86,15 @@ class SettingsCompatibilityTests(unittest.TestCase):
         self.assertIn("vad_threshold", payload)
         self.assertNotIn("ffmpeg_path", payload)
         self.assertTrue(settings.segmentation.enabled)
+        self.assertEqual(settings.translation.temperature, 0.8)
+        self.assertEqual(settings.translation.chunk_size, 24)
         self.assertEqual(settings.segmentation.openai_base_url, "https://segment.example.com/v1")
         self.assertEqual(settings.segmentation.openai_api_key, "segment-key")
         self.assertEqual(settings.segmentation.model, "segment-model")
+        self.assertEqual(settings.segmentation.temperature, 0.35)
+        self.assertEqual(settings.segmentation.max_words_per_window, 220)
+        self.assertTrue(settings.segmentation.thinking_enabled)
+        self.assertEqual(settings.segmentation.reasoning_effort, "max")
         self.assertEqual(settings.vad.min_speech_ms, 320)
         self.assertEqual(settings.vad.min_silence_ms, 520)
         self.assertEqual(settings.vad.speech_pad_ms, 180)

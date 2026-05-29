@@ -350,8 +350,10 @@ class TaskQueueManager(QObject):
 
         attempt = 0
         last_exc: Optional[BaseException] = None
+        max_retries = max(0, int(getattr(settings.transcription, "max_retries", MAX_RETRIES)))
+        retry_base_delay = max(0.1, float(getattr(settings, "retry_base_delay", RETRY_BASE_DELAY)))
 
-        while attempt <= MAX_RETRIES:
+        while attempt <= max_retries:
             # 检查取消
             if control.cancel_event.is_set():
                 self.signals.finished.emit(task_id, False, "Cancelled", "已取消", {})
@@ -359,9 +361,9 @@ class TaskQueueManager(QObject):
 
             # 重试前等待（指数退避）
             if attempt > 0:
-                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                delay = retry_base_delay * (2 ** (attempt - 1))
                 self.signals.progress.emit(task_id, "Preparing", state.progress if state else 0,
-                                           f"重试中 ({attempt}/{MAX_RETRIES})，等待 {delay:.0f}s...")
+                                           f"重试中 ({attempt}/{max_retries})，等待 {delay:.1f}s...")
                 # 分段等待以便及时响应取消
                 waited = 0.0
                 while waited < delay:
@@ -392,7 +394,7 @@ class TaskQueueManager(QObject):
 
             except Exception as exc:
                 last_exc = exc
-                if _is_retryable(exc) and attempt < MAX_RETRIES:
+                if _is_retryable(exc) and attempt < max_retries:
                     attempt += 1
                     continue
                 # 不可重试或已达上限

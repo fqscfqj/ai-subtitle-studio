@@ -46,6 +46,7 @@ class ChatCompletionBackend(Protocol):
         user_prompt: str,
         thinking_enabled: bool = False,
         reasoning_effort: str = "high",
+        temperature: float = 0.2,
     ) -> str:
         ...
 
@@ -63,6 +64,7 @@ class OpenAICompatibleChatBackend(ChatCompletionBackend):
         user_prompt: str,
         thinking_enabled: bool = False,
         reasoning_effort: str = "high",
+        temperature: float = 0.2,
     ) -> str:
         payload: dict = {
             "model": model,
@@ -76,7 +78,7 @@ class OpenAICompatibleChatBackend(ChatCompletionBackend):
             payload["reasoning_effort"] = reasoning_effort
         else:
             payload["thinking"] = {"type": "disabled"}
-            payload["temperature"] = 0.2
+            payload["temperature"] = max(0.0, float(temperature))
 
         response = self.http_client.post_json(
             normalize_chat_completions_url(self.base_url),
@@ -108,6 +110,7 @@ class MistralChatBackend(ChatCompletionBackend):
         user_prompt: str,
         thinking_enabled: bool = False,
         reasoning_effort: str = "high",
+        temperature: float = 0.2,
     ) -> str:
         if Mistral is None:
             details = ""
@@ -126,7 +129,7 @@ class MistralChatBackend(ChatCompletionBackend):
             request_kwargs["reasoning_effort"] = reasoning_effort
         else:
             request_kwargs["reasoning_effort"] = "none"
-            request_kwargs["temperature"] = 0.2
+            request_kwargs["temperature"] = max(0.0, float(temperature))
 
         response = client.chat.complete(**request_kwargs)
         payload = normalize_response(response)
@@ -142,10 +145,14 @@ class StructuredSubtitleTranslationProvider(TranslationProvider):
         backend: ChatCompletionBackend,
         thinking_enabled: bool = False,
         reasoning_effort: str = "high",
+        temperature: float = 0.2,
+        chunk_size: int = 40,
     ) -> None:
         self.backend = backend
         self.thinking_enabled = thinking_enabled
         self.reasoning_effort = reasoning_effort
+        self.temperature = max(0.0, float(temperature))
+        self.chunk_size = max(1, int(chunk_size))
 
     def translate_lines(
         self,
@@ -174,9 +181,8 @@ class StructuredSubtitleTranslationProvider(TranslationProvider):
             f"{style_instruction}"
         )
 
-        chunk_size = 40
         max_attempts = 3
-        chunks = [lines[i : i + chunk_size] for i in range(0, len(lines), chunk_size)]
+        chunks = [lines[i : i + self.chunk_size] for i in range(0, len(lines), self.chunk_size)]
         results: list[str] = []
 
         def translate_single_line(line: str) -> list[str]:
@@ -193,6 +199,7 @@ class StructuredSubtitleTranslationProvider(TranslationProvider):
                     request.model, system_prompt, user_prompt,
                     thinking_enabled=self.thinking_enabled,
                     reasoning_effort=self.reasoning_effort,
+                    temperature=self.temperature,
                 )
                 last_content = content
                 try:
@@ -236,6 +243,7 @@ class StructuredSubtitleTranslationProvider(TranslationProvider):
                     request.model, system_prompt, user_prompt,
                     thinking_enabled=self.thinking_enabled,
                     reasoning_effort=self.reasoning_effort,
+                    temperature=self.temperature,
                 )
                 last_content = content
                 try:
@@ -283,6 +291,8 @@ def build_translation_provider(
     openai_api_key: str,
     thinking_enabled: bool = False,
     reasoning_effort: str = "high",
+    temperature: float = 0.2,
+    chunk_size: int = 40,
 ) -> TranslationProvider | None:
     if mode == "none":
         return None
@@ -291,12 +301,16 @@ def build_translation_provider(
             MistralChatBackend(mistral_api_key),
             thinking_enabled=thinking_enabled,
             reasoning_effort=reasoning_effort,
+            temperature=temperature,
+            chunk_size=chunk_size,
         )
     if mode == "openai":
         return StructuredSubtitleTranslationProvider(
             OpenAICompatibleChatBackend(openai_base_url, openai_api_key),
             thinking_enabled=thinking_enabled,
             reasoning_effort=reasoning_effort,
+            temperature=temperature,
+            chunk_size=chunk_size,
         )
     raise RuntimeError("未知翻译模式")
 

@@ -439,6 +439,7 @@ class TaskRunner:
                     target_language=self.settings.translation.target_language,
                 ),
                 cancel_event=cancel_event,
+                parallel_workers=self.settings.translation.subtitle_translation_thread_count,
             )
             translated_segments = [dict(seg) for seg in result.segments]
             for seg, translated_line in zip(translated_segments, translated_lines):
@@ -452,6 +453,7 @@ class TaskRunner:
                     target_language=self.settings.translation.target_language,
                 ),
                 cancel_event=cancel_event,
+                parallel_workers=self.settings.translation.subtitle_translation_thread_count,
             )
             translated_text = translated_lines[0] if translated_lines else ""
         return translated_segments, translated_text
@@ -473,6 +475,8 @@ class TaskRunner:
             openai_api_key=self.settings.translation.openai_api_key,
             thinking_enabled=self.settings.translation.thinking_enabled,
             reasoning_effort=self.settings.translation.reasoning_effort,
+            temperature=self.settings.translation.temperature,
+            chunk_size=self.settings.translation.chunk_size,
         )
 
     def _build_segmentation_provider(self):

@@ -17,20 +17,38 @@ from .translation import normalize_chat_completions_url
 
 
 class OpenAICompatibleSegmentationBackend:
-    def __init__(self, base_url: str, api_key: str, http_client: Optional[HttpClient] = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        http_client: Optional[HttpClient] = None,
+    ) -> None:
         self.base_url = base_url
         self.api_key = api_key
         self.http_client = http_client or HttpClient()
 
-    def complete(self, model: str, system_prompt: str, user_prompt: str) -> str:
+    def complete(
+        self,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        thinking_enabled: bool = False,
+        reasoning_effort: str = "high",
+        temperature: float = 0.1,
+    ) -> str:
         payload: Dict[str, Any] = {
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": 0.1,
         }
+        if thinking_enabled:
+            payload["thinking"] = {"type": "enabled"}
+            payload["reasoning_effort"] = reasoning_effort
+        else:
+            payload["thinking"] = {"type": "disabled"}
+            payload["temperature"] = max(0.0, float(temperature))
         response = self.http_client.post_json(
             normalize_chat_completions_url(self.base_url),
             payload=payload,
@@ -56,10 +74,16 @@ class ChatCompletionSegmentationProvider(SegmentationProvider):
         backend: OpenAICompatibleSegmentationBackend,
         max_attempts: int = 3,
         max_words_per_window: int = 180,
+        thinking_enabled: bool = False,
+        reasoning_effort: str = "high",
+        temperature: float = 0.1,
     ) -> None:
         self.backend = backend
         self.max_attempts = max(1, max_attempts)
         self.max_words_per_window = max(20, max_words_per_window)
+        self.thinking_enabled = thinking_enabled
+        self.reasoning_effort = reasoning_effort
+        self.temperature = max(0.0, float(temperature))
 
     def segment_words(
         self,
@@ -123,7 +147,14 @@ class ChatCompletionSegmentationProvider(SegmentationProvider):
             if cancel_event.is_set():
                 raise TaskCancelled("智能分段前已取消")
 
-            content = self.backend.complete(request.model, system_prompt, user_prompt)
+            content = self.backend.complete(
+                request.model,
+                system_prompt,
+                user_prompt,
+                thinking_enabled=self.thinking_enabled,
+                reasoning_effort=self.reasoning_effort,
+                temperature=self.temperature,
+            )
             last_content = content
             if cancel_event.is_set():
                 raise TaskCancelled("智能分段前已取消")
@@ -213,7 +244,11 @@ def build_segmentation_provider(settings: SegmentationSettings) -> SegmentationP
         OpenAICompatibleSegmentationBackend(
             base_url=settings.openai_base_url,
             api_key=settings.openai_api_key,
-        )
+        ),
+        max_words_per_window=settings.max_words_per_window,
+        thinking_enabled=settings.thinking_enabled,
+        reasoning_effort=settings.reasoning_effort,
+        temperature=settings.temperature,
     )
 
 

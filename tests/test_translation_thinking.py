@@ -86,6 +86,26 @@ class ThinkingToggleTests(unittest.TestCase):
         self.assertEqual(payload["temperature"], 0.2)
         self.assertNotIn("reasoning_effort", payload)
 
+    def test_openai_compatible_custom_temperature_is_forwarded_when_thinking_disabled(self) -> None:
+        fake_client = FakeHttpClient()
+        backend = OpenAICompatibleChatBackend(
+            base_url="https://example.com/v1",
+            api_key="secret",
+            http_client=fake_client,
+        )
+
+        backend.complete(
+            model="deepseek-v4-flash",
+            system_prompt="sys",
+            user_prompt="user",
+            thinking_enabled=False,
+            reasoning_effort="high",
+            temperature=0.7,
+        )
+
+        payload = fake_client.calls[0]["payload"]
+        self.assertEqual(payload["temperature"], 0.7)
+
 
     def test_mistral_thinking_forwards_reasoning_effort(self) -> None:
         FakeMistralClient.instances.clear()

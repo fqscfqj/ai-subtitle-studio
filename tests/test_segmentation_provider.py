@@ -39,6 +39,7 @@ class SegmentationProviderTests(unittest.TestCase):
             model="segment-model",
             system_prompt="sys",
             user_prompt="user",
+            temperature=0.25,
         )
 
         self.assertEqual(content, '[{"start_index":0,"end_index":0}]')
@@ -46,8 +47,31 @@ class SegmentationProviderTests(unittest.TestCase):
         call = fake_client.calls[0]
         self.assertEqual(call["url"], "https://segment.example.com/v1/chat/completions")
         self.assertEqual(call["payload"]["model"], "segment-model")
-        self.assertEqual(call["payload"]["temperature"], 0.1)
+        self.assertEqual(call["payload"]["temperature"], 0.25)
+        self.assertEqual(call["payload"]["thinking"], {"type": "disabled"})
+        self.assertNotIn("reasoning_effort", call["payload"])
         self.assertEqual(call["headers"]["Authorization"], "Bearer secret")
+
+    def test_openai_compatible_backend_can_enable_thinking(self) -> None:
+        fake_client = FakeHttpClient('[{"start_index":0,"end_index":0}]')
+        backend = OpenAICompatibleSegmentationBackend(
+            base_url="https://segment.example.com/v1",
+            api_key="secret",
+            http_client=fake_client,
+        )
+
+        backend.complete(
+            model="segment-model",
+            system_prompt="sys",
+            user_prompt="user",
+            thinking_enabled=True,
+            reasoning_effort="max",
+        )
+
+        payload = fake_client.calls[0]["payload"]
+        self.assertEqual(payload["thinking"], {"type": "enabled"})
+        self.assertEqual(payload["reasoning_effort"], "max")
+        self.assertNotIn("temperature", payload)
 
     def test_segment_words_returns_valid_ranges(self) -> None:
         fake_client = FakeHttpClient('[{"start_index":0,"end_index":1},{"start_index":2,"end_index":2}]')

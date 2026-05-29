@@ -134,6 +134,8 @@ def has_ffmpeg() -> bool:
 
 def serialize_settings(settings: AppSettings) -> Dict[str, Any]:
     return {
+        "ui_theme": settings.ui_theme,
+        "task_retry_base_delay": settings.retry_base_delay,
         "transcription_provider": settings.transcription.provider,
         "api_key": settings.transcription.mistral.api_key,
         "model": settings.transcription.mistral.model,
@@ -148,6 +150,7 @@ def serialize_settings(settings: AppSettings) -> Dict[str, Any]:
         "diarize": settings.transcription.diarize,
         "context_bias": settings.transcription.context_bias,
         "thread_count": settings.transcription.thread_count,
+        "task_max_retries": settings.transcription.max_retries,
         "translation_mode": settings.translation.mode,
         "translation_target": settings.translation.target_language,
         "translation_model": settings.translation.model,
@@ -159,10 +162,16 @@ def serialize_settings(settings: AppSettings) -> Dict[str, Any]:
         "translation_openai_key": settings.translation.openai_api_key,
         "translation_thinking_enabled": settings.translation.thinking_enabled,
         "translation_reasoning_effort": settings.translation.reasoning_effort,
+        "translation_temperature": settings.translation.temperature,
+        "translation_chunk_size": settings.translation.chunk_size,
         "segmentation_enabled": settings.segmentation.enabled,
         "segmentation_openai_base": settings.segmentation.openai_base_url,
         "segmentation_openai_key": settings.segmentation.openai_api_key,
         "segmentation_model": settings.segmentation.model,
+        "segmentation_temperature": settings.segmentation.temperature,
+        "segmentation_max_words_per_window": settings.segmentation.max_words_per_window,
+        "segmentation_thinking_enabled": settings.segmentation.thinking_enabled,
+        "segmentation_reasoning_effort": settings.segmentation.reasoning_effort,
         "output_mode": settings.output.mode,
         "output_dir": str(settings.output.output_dir),
         "save_srt": settings.output.save_srt,
@@ -180,6 +189,15 @@ def serialize_settings(settings: AppSettings) -> Dict[str, Any]:
 
 def deserialize_settings(data: Dict[str, Any]) -> AppSettings:
     settings = default_settings()
+
+    theme_name = _safe_str(data.get("ui_theme"), settings.ui_theme).strip().lower()
+    settings.ui_theme = theme_name if theme_name in {"light", "dark"} else settings.ui_theme
+    settings.retry_base_delay = _safe_float(
+        data.get("task_retry_base_delay", data.get("retry_base_delay")),
+        settings.retry_base_delay,
+        0.1,
+        30.0,
+    )
 
     settings.transcription.provider = _safe_str(
         data.get("transcription_provider", data.get("provider", settings.transcription.provider)),
@@ -223,6 +241,12 @@ def deserialize_settings(data: Dict[str, Any]) -> AppSettings:
         settings.transcription.thread_count,
         1,
         16,
+    )
+    settings.transcription.max_retries = _safe_int(
+        data.get("task_max_retries", data.get("max_retries")),
+        settings.transcription.max_retries,
+        0,
+        10,
     )
 
     translation_mode_index = _safe_int(data.get("translation_mode_index"), -1)
@@ -272,6 +296,18 @@ def deserialize_settings(data: Dict[str, Any]) -> AppSettings:
         data.get("translation_reasoning_effort"),
         settings.translation.reasoning_effort,
     )
+    settings.translation.temperature = _safe_float(
+        data.get("translation_temperature"),
+        settings.translation.temperature,
+        0.0,
+        2.0,
+    )
+    settings.translation.chunk_size = _safe_int(
+        data.get("translation_chunk_size"),
+        settings.translation.chunk_size,
+        10,
+        100,
+    )
 
     settings.segmentation.enabled = _safe_bool(
         data.get("segmentation_enabled"),
@@ -289,6 +325,28 @@ def deserialize_settings(data: Dict[str, Any]) -> AppSettings:
         data.get("segmentation_model"),
         settings.segmentation.model,
     )
+    settings.segmentation.temperature = _safe_float(
+        data.get("segmentation_temperature"),
+        settings.segmentation.temperature,
+        0.0,
+        2.0,
+    )
+    settings.segmentation.max_words_per_window = _safe_int(
+        data.get("segmentation_max_words_per_window"),
+        settings.segmentation.max_words_per_window,
+        50,
+        500,
+    )
+    settings.segmentation.thinking_enabled = _safe_bool(
+        data.get("segmentation_thinking_enabled"),
+        settings.segmentation.thinking_enabled,
+    )
+    segmentation_reasoning_effort = _safe_str(
+        data.get("segmentation_reasoning_effort"),
+        settings.segmentation.reasoning_effort,
+    ).strip().lower()
+    if segmentation_reasoning_effort in {"low", "medium", "high", "max"}:
+        settings.segmentation.reasoning_effort = segmentation_reasoning_effort
 
     settings.output.mode = _safe_str(
         data.get("output_mode", "custom" if data.get("output_mode_index") == 1 else settings.output.mode),
