@@ -11,7 +11,6 @@ from .models import (
     AppSettings,
     MistralProviderSettings,
     OutputSettings,
-    Qwen3ASRProviderSettings,
     SegmentationSettings,
     TranscriptionSettings,
     TranslationSettings,
@@ -62,10 +61,6 @@ def default_settings() -> AppSettings:
                 base_url="https://api.openai.com/v1",
                 api_key=os.environ.get("OPENAI_API_KEY", ""),
                 model="whisper-1",
-            ),
-            qwen3asr=Qwen3ASRProviderSettings(
-                api_key=os.environ.get("DASHSCOPE_API_KEY", ""),
-                model="qwen3-asr-flash",
             ),
         ),
         translation=TranslationSettings(
@@ -142,8 +137,6 @@ def serialize_settings(settings: AppSettings) -> Dict[str, Any]:
         "whisper_base_url": settings.transcription.whisper.base_url,
         "whisper_api_key": settings.transcription.whisper.api_key,
         "whisper_model": settings.transcription.whisper.model,
-        "qwen3asr_api_key": settings.transcription.qwen3asr.api_key,
-        "qwen3asr_model": settings.transcription.qwen3asr.model,
         "language_mode": settings.transcription.language_mode,
         "language": settings.transcription.language,
         "timestamp": settings.transcription.timestamp_granularity,
@@ -216,14 +209,6 @@ def deserialize_settings(data: Dict[str, Any]) -> AppSettings:
     settings.transcription.whisper.model = _safe_str(
         data.get("whisper_model"),
         settings.transcription.whisper.model,
-    )
-    settings.transcription.qwen3asr.api_key = _safe_str(
-        data.get("qwen3asr_api_key"),
-        settings.transcription.qwen3asr.api_key,
-    )
-    settings.transcription.qwen3asr.model = _safe_str(
-        data.get("qwen3asr_model"),
-        settings.transcription.qwen3asr.model,
     )
     settings.transcription.language_mode = _safe_str(
         data.get("language_mode", "manual" if data.get("language_mode_index") == 1 else settings.transcription.language_mode),

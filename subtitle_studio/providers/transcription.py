@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import base64
 import importlib
-import json
 from pathlib import Path
 from threading import Event
 from typing import Any, Callable, Dict, Optional
@@ -10,7 +8,6 @@ from typing import Any, Callable, Dict, Optional
 from ..http_client import HttpClient
 from ..models import (
     MistralProviderSettings,
-    Qwen3ASRProviderSettings,
     TranscriptionProvider,
     TranscriptionRequest,
     TranscriptionResult,
@@ -169,136 +166,6 @@ class WhisperOpenAICompatibleProvider(TranscriptionProvider):
         }.get(suffix, "application/octet-stream")
 
 
-_DASHSCOPE_OPENAI_COMPAT_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-
-_MIME_MAP = {
-    ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
-    ".aac": "audio/aac", ".flac": "audio/flac", ".ogg": "audio/ogg",
-    ".opus": "audio/ogg", ".webm": "audio/webm", ".wma": "audio/x-ms-wma",
-    ".avi": "video/avi", ".mkv": "video/x-matroska", ".mov": "video/quicktime",
-    ".mp4": "video/mp4", ".flv": "video/x-flv", ".mpeg": "video/mpeg",
-    ".amr": "audio/amr", ".aiff": "audio/aiff",
-}
-
-
-class Qwen3ASRProvider(TranscriptionProvider):
-    def __init__(self, settings: Qwen3ASRProviderSettings, http_client: Optional[HttpClient] = None) -> None:
-        self.settings = settings
-        self.http_client = http_client or HttpClient(timeout_seconds=600)
-        # qwen3-asr-flash-filetrans 不支持 OpenAI 兼容模式，自动修正
-        if "filetrans" in self.settings.model:
-            self.settings.model = "qwen3-asr-flash"
-
-    def transcribe(
-        self,
-        request: TranscriptionRequest,
-        progress_cb: Optional[Callable[[str], None]],
-        cancel_event: Event,
-    ) -> TranscriptionResult:
-        if cancel_event.is_set():
-            raise RuntimeError("转写前已取消")
-
-        audio_path = request.audio_path
-        file_size_mb = audio_path.stat().st_size / (1024 * 1024)
-        if file_size_mb > 10:
-            raise RuntimeError(
-                f"Qwen3 ASR (qwen3-asr-flash) 单文件限制 10MB，当前文件 {file_size_mb:.1f}MB。"
-                "请使用 VAD 预切分或将音频上传至公网后用 qwen3-asr-flash-filetrans。"
-            )
-
-        if progress_cb:
-            progress_cb("正在读取音频文件")
-        suffix = audio_path.suffix.lower()
-        mime_type = _MIME_MAP.get(suffix, "application/octet-stream")
-        audio_bytes = audio_path.read_bytes()
-        b64_data = base64.b64encode(audio_bytes).decode("ascii")
-        data_url = f"data:{mime_type};base64,{b64_data}"
-
-        if progress_cb:
-            progress_cb("正在调用 Qwen3 ASR")
-        payload = self._call_sync_api(data_url, request, cancel_event)
-
-        if cancel_event.is_set():
-            raise RuntimeError("转写已取消")
-
-        text = self._extract_text(payload)
-        segments = self._extract_segments(payload)
-        language = detect_language_code(payload)
-        return TranscriptionResult(
-            text=text,
-            segments=segments,
-            language=language,
-            raw_payload=payload,
-        )
-
-    def _call_sync_api(
-        self,
-        data_url: str,
-        request: TranscriptionRequest,
-        cancel_event: Event,
-    ) -> Dict[str, Any]:
-        messages: list[Dict[str, Any]] = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_audio",
-                        "input_audio": {"data": data_url},
-                    }
-                ],
-            }
-        ]
-
-        body: Dict[str, Any] = {
-            "model": self.settings.model,
-            "messages": messages,
-            "stream": False,
-        }
-
-        asr_options: Dict[str, Any] = {}
-        if request.language_mode == "manual" and request.language:
-            asr_options["language"] = request.language
-        if request.context_bias:
-            asr_options["prompt"] = request.context_bias
-        if asr_options:
-            body["asr_options"] = asr_options
-
-        headers = {
-            "Authorization": f"Bearer {self.settings.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        response = self.http_client.post_json(_DASHSCOPE_OPENAI_COMPAT_URL, body, headers)
-        if response.status_code >= 400:
-            raise RuntimeError(
-                f"Qwen3 ASR 接口返回错误: HTTP {response.status_code} {response.text[:240]}"
-            )
-        payload = response.payload if isinstance(response.payload, dict) else {}
-
-        choices = payload.get("choices", [])
-        if not choices:
-            raise RuntimeError(f"Qwen3 ASR 返回空结果: {response.text[:240]}")
-
-        return payload
-
-    @staticmethod
-    def _extract_text(payload: Dict[str, Any]) -> str:
-        choices = payload.get("choices", [])
-        if not choices:
-            return ""
-        message = choices[0].get("message", {})
-        return message.get("content", "")
-
-    @staticmethod
-    def _extract_segments(payload: Dict[str, Any]) -> list[Dict[str, Any]]:
-        choices = payload.get("choices", [])
-        if not choices:
-            return []
-        message = choices[0].get("message", {})
-        text = message.get("content", "")
-        if not text:
-            return []
-        return [{"start": 0.0, "end": 0.0, "text": text}]
 
 
 def summarize_empty_transcription_response(payload: Dict[str, Any], raw_text: str) -> str:

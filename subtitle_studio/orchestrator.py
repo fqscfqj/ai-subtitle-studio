@@ -26,7 +26,6 @@ from .models import (
 from .providers.segmentation import build_segmentation_provider
 from .providers.transcription import (
     MistralTranscriptionProvider,
-    Qwen3ASRProvider,
     WhisperOpenAICompatibleProvider,
     summarize_empty_transcription_response,
 )
@@ -234,7 +233,7 @@ class TaskRunner:
     def _run_transcription_chunks(
         self,
         source_path: Path,
-        provider: MistralTranscriptionProvider | WhisperOpenAICompatibleProvider | Qwen3ASRProvider,
+        provider: MistralTranscriptionProvider | WhisperOpenAICompatibleProvider,
         chunks: List[AudioChunk],
         report: Callable[[str, int, str], None],
         cancel_event: Event,
@@ -320,7 +319,7 @@ class TaskRunner:
         if detected_language:
             payload["language"] = detected_language
         if (
-            isinstance(provider, (WhisperOpenAICompatibleProvider, Qwen3ASRProvider))
+            isinstance(provider, WhisperOpenAICompatibleProvider)
             and not merged_segments
             and not payload["text"]
         ):
@@ -460,11 +459,9 @@ class TaskRunner:
 
     def _build_transcription_provider(
         self,
-    ) -> MistralTranscriptionProvider | WhisperOpenAICompatibleProvider | Qwen3ASRProvider:
+    ) -> MistralTranscriptionProvider | WhisperOpenAICompatibleProvider:
         if self.settings.transcription.provider == "whisper_openai_compatible":
             return WhisperOpenAICompatibleProvider(self.settings.transcription.whisper)
-        if self.settings.transcription.provider == "qwen3asr":
-            return Qwen3ASRProvider(self.settings.transcription.qwen3asr)
         return MistralTranscriptionProvider(self.settings.transcription.mistral)
 
     def _build_translation_provider(self):

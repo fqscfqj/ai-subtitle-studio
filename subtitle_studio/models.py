@@ -29,12 +29,6 @@ class WhisperProviderSettings:
 
 
 @dataclass
-class Qwen3ASRProviderSettings:
-    api_key: str = ""
-    model: str = "qwen3-asr-flash"
-
-
-@dataclass
 class TranscriptionSettings:
     provider: str = "mistral"
     language_mode: str = "auto"
@@ -46,7 +40,6 @@ class TranscriptionSettings:
     max_retries: int = 3
     mistral: MistralProviderSettings = field(default_factory=MistralProviderSettings)
     whisper: WhisperProviderSettings = field(default_factory=WhisperProviderSettings)
-    qwen3asr: Qwen3ASRProviderSettings = field(default_factory=Qwen3ASRProviderSettings)
 
 
 @dataclass

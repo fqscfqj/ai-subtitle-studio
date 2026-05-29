@@ -565,7 +565,6 @@ class MainWindow(QMainWindow):
         self.transcription_provider_combo = NoWheelComboBox(panel)
         self.transcription_provider_combo.addItem("Mistral", "mistral")
         self.transcription_provider_combo.addItem("Whisper(OpenAI 兼容)", "whisper_openai_compatible")
-        self.transcription_provider_combo.addItem("Qwen3 ASR（DashScope）", "qwen3asr")
         self.transcription_provider_combo.currentIndexChanged.connect(self.on_transcription_provider_changed)
 
         provider_card, provider_body = self._build_card(
@@ -577,7 +576,6 @@ class MainWindow(QMainWindow):
             [
                 ("Mistral", "长音频友好 · 支持说话人分离", "mistral"),
                 ("Whisper", "OpenAI 兼容接口 · 接入灵活", "whisper_openai_compatible"),
-                ("Qwen3 ASR", "DashScope 接口 · 轻量快速", "qwen3asr"),
             ],
         )
         provider_body.addWidget(provider_buttons)
@@ -605,15 +603,6 @@ class MainWindow(QMainWindow):
         self.whisper_model_label = self._field_label("Whisper 模型")
         self.whisper_model_input = QLineEdit("whisper-1")
 
-        self.qwen3asr_api_key_label = self._field_label("DashScope API Key")
-        self.qwen3asr_key_row, self.qwen3asr_api_key_input, self.show_qwen3asr_key_checkbox = self._build_secret_row(
-            "DASHSCOPE_API_KEY"
-        )
-        self.qwen3asr_model_label = self._field_label("Qwen3 ASR 模型")
-        self.qwen3asr_model_combo = NoWheelComboBox()
-        self.qwen3asr_model_combo.setEditable(True)
-        self.qwen3asr_model_combo.addItems(["qwen3-asr-flash", "qwen3-asr-flash-2026-02-10"])
-
         self.diarize_checkbox = QCheckBox("启用说话人分离（仅 Mistral）")
 
         credentials_grid.addWidget(self.mistral_api_key_label, 0, 0)
@@ -626,11 +615,7 @@ class MainWindow(QMainWindow):
         credentials_grid.addWidget(self.whisper_key_row, 3, 1)
         credentials_grid.addWidget(self.whisper_model_label, 4, 0)
         credentials_grid.addWidget(self.whisper_model_input, 4, 1)
-        credentials_grid.addWidget(self.qwen3asr_api_key_label, 5, 0)
-        credentials_grid.addWidget(self.qwen3asr_key_row, 5, 1)
-        credentials_grid.addWidget(self.qwen3asr_model_label, 6, 0)
-        credentials_grid.addWidget(self.qwen3asr_model_combo, 6, 1)
-        credentials_grid.addWidget(self.diarize_checkbox, 7, 0, 1, 2)
+        credentials_grid.addWidget(self.diarize_checkbox, 5, 0, 1, 2)
         layout.addWidget(credentials_card)
 
         advanced_card, advanced_body = self._build_card(
@@ -765,12 +750,6 @@ class MainWindow(QMainWindow):
             self.whisper_key_row,
             self.whisper_model_label,
             self.whisper_model_input,
-        ]
-        self.transcription_qwen3asr_widgets = [
-            self.qwen3asr_api_key_label,
-            self.qwen3asr_key_row,
-            self.qwen3asr_model_label,
-            self.qwen3asr_model_combo,
         ]
         self.segmentation_config_widgets = [
             self.segmentation_base_url_label,
@@ -1096,7 +1075,7 @@ class MainWindow(QMainWindow):
         theme_index = {"light": 0, "dark": 1}.get(settings.ui_theme, 0)
         self.theme_combo.setCurrentIndex(theme_index)
 
-        provider_index = {"mistral": 0, "whisper_openai_compatible": 1, "qwen3asr": 2}.get(
+        provider_index = {"mistral": 0, "whisper_openai_compatible": 1}.get(
             settings.transcription.provider, 0
         )
         self.transcription_provider_combo.setCurrentIndex(provider_index)
@@ -1105,8 +1084,6 @@ class MainWindow(QMainWindow):
         self.whisper_base_url_input.setText(settings.transcription.whisper.base_url)
         self.whisper_api_key_input.setText(settings.transcription.whisper.api_key)
         self.whisper_model_input.setText(settings.transcription.whisper.model)
-        self.qwen3asr_api_key_input.setText(settings.transcription.qwen3asr.api_key)
-        self.qwen3asr_model_combo.setCurrentText(settings.transcription.qwen3asr.model)
         self.language_mode_combo.setCurrentIndex(1 if settings.transcription.language_mode == "manual" else 0)
         self.language_input.setText(settings.transcription.language)
         self.timestamp_combo.setCurrentText(settings.transcription.timestamp_granularity)
@@ -1164,8 +1141,6 @@ class MainWindow(QMainWindow):
         settings.transcription.whisper.base_url = self.whisper_base_url_input.text().strip() or "https://api.openai.com/v1"
         settings.transcription.whisper.api_key = self.whisper_api_key_input.text().strip()
         settings.transcription.whisper.model = self.whisper_model_input.text().strip() or "whisper-1"
-        settings.transcription.qwen3asr.api_key = self.qwen3asr_api_key_input.text().strip()
-        settings.transcription.qwen3asr.model = self.qwen3asr_model_combo.currentText().strip() or "qwen3-asr-flash"
         settings.transcription.language_mode = "manual" if self.language_mode_combo.currentIndex() == 1 else "auto"
         settings.transcription.language = normalize_language_code(self.language_input.text().strip())
         settings.transcription.timestamp_granularity = self.timestamp_combo.currentText().strip() or "none"
@@ -1231,7 +1206,6 @@ class MainWindow(QMainWindow):
         translation_mode = self.translation_mode_combo.currentData() if hasattr(self, "translation_mode_combo") else "none"
         use_mistral = provider == "mistral"
         use_whisper = provider == "whisper_openai_compatible"
-        use_qwen3asr = provider == "qwen3asr"
         show_mistral_key = use_mistral or translation_mode == "mistral"
 
         self._sync_choice_buttons(self.transcription_provider_combo, self.transcription_provider_buttons)
@@ -1240,7 +1214,6 @@ class MainWindow(QMainWindow):
         self._set_widgets_visible(self.transcription_mistral_key_widgets, show_mistral_key)
         self._set_widgets_visible(self.transcription_mistral_only_widgets, use_mistral)
         self._set_widgets_visible(self.transcription_whisper_widgets, use_whisper)
-        self._set_widgets_visible(self.transcription_qwen3asr_widgets, use_qwen3asr)
 
         self.mistral_api_key_input.setEnabled(show_mistral_key)
         self.show_mistral_key_checkbox.setEnabled(show_mistral_key)
@@ -1249,9 +1222,6 @@ class MainWindow(QMainWindow):
         self.whisper_api_key_input.setEnabled(use_whisper)
         self.show_whisper_key_checkbox.setEnabled(use_whisper)
         self.whisper_model_input.setEnabled(use_whisper)
-        self.qwen3asr_api_key_input.setEnabled(use_qwen3asr)
-        self.show_qwen3asr_key_checkbox.setEnabled(use_qwen3asr)
-        self.qwen3asr_model_combo.setEnabled(use_qwen3asr)
         self.diarize_checkbox.setEnabled(use_mistral)
         if not use_mistral:
             self.diarize_checkbox.setChecked(False)
@@ -1309,7 +1279,6 @@ class MainWindow(QMainWindow):
         eligible = (
             self.enable_segmentation_checkbox.isChecked()
             and self.timestamp_combo.currentText().strip() == "word"
-            and self.transcription_provider_combo.currentData() != "qwen3asr"
         )
         thinking_enabled = self.segmentation_thinking_checkbox.isChecked()
         self.segmentation_reasoning_effort_combo.setEnabled(eligible and thinking_enabled)
@@ -1334,13 +1303,10 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "segmentation_config_widgets"):
             return
         enabled = self.enable_segmentation_checkbox.isChecked()
-        provider = self.transcription_provider_combo.currentData()
         timestamp_granularity = self.timestamp_combo.currentText().strip()
-        eligible = timestamp_granularity == "word" and provider != "qwen3asr"
+        eligible = timestamp_granularity == "word"
 
-        if provider == "qwen3asr":
-            hint = "Qwen3 ASR 当前不支持词级时间戳，无法启用智能分段。"
-        elif timestamp_granularity != "word":
+        if timestamp_granularity != "word":
             hint = "智能分段仅在时间戳粒度为 word 时生效。"
         else:
             hint = "启用后将调用专用 OpenAI 兼容 API 做语义分段，并以新分段继续翻译和写出。"
@@ -1803,8 +1769,6 @@ class MainWindow(QMainWindow):
         if settings.segmentation.enabled:
             if settings.transcription.timestamp_granularity != "word":
                 raise RuntimeError("启用智能分段时，时间戳粒度必须为 word")
-            if settings.transcription.provider == "qwen3asr":
-                raise RuntimeError("Qwen3 ASR 当前不支持词级时间戳，无法使用智能分段")
             if not settings.segmentation.openai_base_url:
                 raise RuntimeError("请填写智能分段专用 API 的 Base URL")
             if not is_valid_http_url(settings.segmentation.openai_base_url):
