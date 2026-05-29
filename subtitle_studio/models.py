@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Optional, Protocol
 
 
 Segment = Dict[str, Any]
+WordToken = Dict[str, Any]
 ProgressCallback = Callable[[str, int, str], None]
 
 
@@ -63,6 +64,14 @@ class TranslationSettings:
 
 
 @dataclass
+class SegmentationSettings:
+    enabled: bool = False
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_api_key: str = ""
+    model: str = "gpt-4o-mini"
+
+
+@dataclass
 class OutputSettings:
     mode: str = "source"
     output_dir: Path = field(default_factory=lambda: Path.cwd() / "subtitles")
@@ -86,6 +95,7 @@ class VadSettings:
 class AppSettings:
     transcription: TranscriptionSettings = field(default_factory=TranscriptionSettings)
     translation: TranslationSettings = field(default_factory=TranslationSettings)
+    segmentation: SegmentationSettings = field(default_factory=SegmentationSettings)
     output: OutputSettings = field(default_factory=OutputSettings)
     vad: VadSettings = field(default_factory=VadSettings)
 
@@ -130,6 +140,12 @@ class TranslationRequest:
     target_language: str
 
 
+@dataclass
+class SegmentationRequest:
+    model: str
+    source_language: str = ""
+
+
 class TranscriptionProvider(Protocol):
     def transcribe(
         self,
@@ -148,5 +164,15 @@ class TranslationProvider(Protocol):
         cancel_event: Event,
         parallel_workers: int = 1,
     ) -> list[str]:
+        ...
+
+
+class SegmentationProvider(Protocol):
+    def segment_words(
+        self,
+        words: list[WordToken],
+        request: SegmentationRequest,
+        cancel_event: Event,
+    ) -> list[tuple[int, int]]:
         ...
 

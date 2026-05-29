@@ -164,33 +164,101 @@ def extract_text(payload: Dict[str, Any]) -> str:
 
 def extract_segments(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     raw = payload.get("segments")
-    if not isinstance(raw, list):
-        return []
-
+    top_level_words, top_level_word_pairs = _extract_word_tokens(payload.get("words"))
+    if not top_level_words:
+        top_level_words, top_level_word_pairs = _extract_word_tokens(payload.get("tokens"))
     segments: List[Dict[str, Any]] = []
     raw_pairs: List[tuple[float, float]] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        start = item.get("start")
-        end = item.get("end")
-        text = item.get("text")
-        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+
+            segment_words, segment_word_pairs = _extract_word_tokens(item.get("words"))
+            if not segment_words:
+                segment_words, segment_word_pairs = _extract_word_tokens(item.get("tokens"))
+
+            start = _coerce_timestamp(item.get("start"))
+            end = _coerce_timestamp(item.get("end"))
+            if (start is None or end is None) and segment_word_pairs:
+                start = segment_word_pairs[0][0]
+                end = segment_word_pairs[-1][1]
+            if start is None or end is None:
+                continue
+
+            text = item.get("text")
             cleaned_text = sanitize_transcribed_text(str(text or ""))
+            if not cleaned_text and segment_words:
+                cleaned_text = sanitize_transcribed_text(join_word_tokens(segment_words))
             if not cleaned_text:
                 continue
+
             segment: Dict[str, Any] = {
                 "start": float(start),
                 "end": float(end),
                 "text": cleaned_text,
             }
+            if segment_words:
+                _normalize_timeline_items(segment_words, segment_word_pairs)
+                segment["words"] = segment_words
             if "speaker" in item:
                 segment["speaker"] = item.get("speaker")
             segments.append(segment)
             raw_pairs.append((float(start), float(end)))
+
     if segments:
         _normalize_segment_timestamps(segments, raw_pairs)
-    return segments
+        if top_level_words and not any(isinstance(seg.get("words"), list) and seg.get("words") for seg in segments):
+            _normalize_timeline_items(top_level_words, top_level_word_pairs)
+            _attach_words_to_segments(segments, top_level_words)
+        return segments
+
+    if top_level_words:
+        _normalize_timeline_items(top_level_words, top_level_word_pairs)
+        synthesized_text = sanitize_transcribed_text(extract_text(payload) or join_word_tokens(top_level_words))
+        if not synthesized_text:
+            synthesized_text = join_word_tokens(top_level_words)
+        if synthesized_text:
+            return [{
+                "start": float(top_level_words[0]["start"]),
+                "end": float(top_level_words[-1]["end"]),
+                "text": synthesized_text,
+                "words": [dict(word) for word in top_level_words],
+            }]
+    return []
+
+
+def collect_word_tokens(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    words: List[Dict[str, Any]] = []
+    for segment in segments:
+        raw_words = segment.get("words")
+        if not isinstance(raw_words, list):
+            continue
+        for item in raw_words:
+            if isinstance(item, dict):
+                words.append(dict(item))
+    return words
+
+
+def join_word_tokens(words: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for word in words:
+        raw_text = str(word.get("text", ""))
+        if not raw_text or not raw_text.strip():
+            continue
+        if not parts:
+            parts.append(raw_text.lstrip())
+            continue
+        if raw_text[:1].isspace():
+            parts.append(raw_text)
+            continue
+
+        previous_text = parts[-1]
+        if _should_insert_word_space(previous_text, raw_text):
+            parts.append(f" {raw_text}")
+        else:
+            parts.append(raw_text)
+    return re.sub(r"\s+", " ", "".join(parts).strip())
 
 
 def sanitize_transcribed_text(value: str) -> str:
@@ -296,8 +364,118 @@ def _is_meaningful_char(ch: str) -> bool:
     return False
 
 
-def _normalize_segment_timestamps(
+def _coerce_timestamp(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return None
+        try:
+            return float(token)
+        except Exception:
+            return None
+    return None
+
+
+def _extract_word_tokens(raw: Any) -> tuple[List[Dict[str, Any]], List[tuple[float, float]]]:
+    if not isinstance(raw, list):
+        return [], []
+
+    words: List[Dict[str, Any]] = []
+    raw_pairs: List[tuple[float, float]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        start = _coerce_timestamp(item.get("start"))
+        end = _coerce_timestamp(item.get("end"))
+        if start is None or end is None:
+            continue
+
+        raw_text = ""
+        for key in ("text", "word", "token", "value"):
+            value = item.get(key)
+            if isinstance(value, str):
+                raw_text = value
+                break
+        if not raw_text or not raw_text.strip():
+            continue
+
+        words.append(
+            {
+                "start": float(start),
+                "end": float(end),
+                "text": raw_text,
+            }
+        )
+        raw_pairs.append((float(start), float(end)))
+    return words, raw_pairs
+
+
+def _attach_words_to_segments(
     segments: List[Dict[str, Any]],
+    words: List[Dict[str, Any]],
+) -> None:
+    if not segments or not words:
+        return
+
+    word_index = 0
+    for segment_index, segment in enumerate(segments):
+        next_segment_start = None
+        if segment_index + 1 < len(segments):
+            next_segment_start = float(segments[segment_index + 1].get("start", segment.get("end", 0.0)))
+
+        bucket: List[Dict[str, Any]] = []
+        while word_index < len(words):
+            word = words[word_index]
+            midpoint = (float(word["start"]) + float(word["end"])) / 2.0
+            current_end = float(segment.get("end", 0.0))
+            if next_segment_start is not None and midpoint >= next_segment_start and bucket:
+                break
+            if midpoint <= current_end or segment_index == len(segments) - 1:
+                bucket.append(dict(word))
+                word_index += 1
+                continue
+            if next_segment_start is not None and midpoint < next_segment_start:
+                bucket.append(dict(word))
+                word_index += 1
+                continue
+            break
+
+        if bucket:
+            segment["words"] = bucket
+
+    if word_index < len(words):
+        trailing_words = [dict(word) for word in words[word_index:]]
+        segments[-1].setdefault("words", []).extend(trailing_words)
+
+
+def _should_insert_word_space(previous_text: str, current_text: str) -> bool:
+    prev_char = previous_text[-1:] if previous_text else ""
+    curr_char = current_text[:1]
+    if not prev_char or not curr_char:
+        return False
+    if prev_char.isspace() or curr_char.isspace():
+        return False
+    if _is_cjk_text_char(prev_char) or _is_cjk_text_char(curr_char):
+        return False
+    if curr_char in ".,!?;:%)]}，。！？；：、）】》』」":
+        return False
+    if curr_char in "'’\"”」』】》":
+        return False
+    if prev_char in "([{" + "“‘「『【《（":
+        return False
+    return _is_meaningful_char(prev_char) and _is_meaningful_char(curr_char)
+
+
+def _is_cjk_text_char(ch: str) -> bool:
+    if not ch:
+        return False
+    return unicodedata.east_asian_width(ch) in {"W", "F"} and _is_meaningful_char(ch)
+
+
+def _normalize_timeline_items(
+    items: List[Dict[str, Any]],
     raw_pairs: List[tuple[float, float]],
 ) -> None:
     if not raw_pairs:
@@ -313,11 +491,10 @@ def _normalize_segment_timestamps(
         return value
 
     prev_end = 0.0
-    for seg, (raw_start, raw_end) in zip(segments, raw_pairs):
+    for item, (raw_start, raw_end) in zip(items, raw_pairs):
         start = max(0.0, float(_to_seconds(raw_start)))
         end = max(0.0, float(_to_seconds(raw_end)))
 
-        # Protect timeline continuity when upstream mixes raw units.
         if start < prev_end:
             start = prev_end
         if end < start and abs(raw_end) >= large_threshold:
@@ -325,9 +502,16 @@ def _normalize_segment_timestamps(
         if end < start:
             end = start
 
-        seg["start"] = start
-        seg["end"] = end
+        item["start"] = start
+        item["end"] = end
         prev_end = end
+
+
+def _normalize_segment_timestamps(
+    segments: List[Dict[str, Any]],
+    raw_pairs: List[tuple[float, float]],
+) -> None:
+    _normalize_timeline_items(segments, raw_pairs)
 
 
 def build_srt_text(segments: List[Dict[str, Any]], fallback_text: str) -> str:

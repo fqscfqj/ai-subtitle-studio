@@ -15,7 +15,15 @@ from .media import (
     split_audio_into_chunks,
     split_audio_with_vad,
 )
-from .models import AppSettings, TaskCancelled, TranscriptionRequest, TranscriptionResult, TranslationRequest
+from .models import (
+    AppSettings,
+    SegmentationRequest,
+    TaskCancelled,
+    TranscriptionRequest,
+    TranscriptionResult,
+    TranslationRequest,
+)
+from .providers.segmentation import build_segmentation_provider
 from .providers.transcription import (
     MistralTranscriptionProvider,
     Qwen3ASRProvider,
@@ -24,9 +32,11 @@ from .providers.transcription import (
 )
 from .providers.translation import build_translation_provider
 from .utils import (
+    collect_word_tokens,
     detect_language_code,
     extract_subtitle_source,
     infer_language_code_from_filename,
+    join_word_tokens,
     normalize_language_code,
     sanitize_transcribed_text,
     trim_language_suffix_from_stem,
@@ -98,6 +108,9 @@ class TaskRunner:
                     report("Transcribing", 50, f"音频过长，自动拆分为 {len(chunks)} 段")
 
             result = self._run_transcription_chunks(source_path, provider, chunks, report, cancel_event)
+            if self.settings.segmentation.enabled:
+                report("Transcribing", 82, "正在执行智能分段")
+                result = self._apply_intelligent_segmentation(result, cancel_event)
 
             report("Writing", 85, "正在生成转写文件")
             if cancel_event.is_set():
@@ -268,6 +281,29 @@ class TaskRunner:
                     adjusted["start"] = float(segment["start"]) + chunk.start_offset
                     adjusted["end"] = float(segment["end"]) + chunk.start_offset
                     adjusted["text"] = segment_text
+                    segment_words = segment.get("words")
+                    if isinstance(segment_words, list):
+                        adjusted_words: list[dict[str, Any]] = []
+                        for word in segment_words:
+                            if not isinstance(word, dict):
+                                continue
+                            text = str(word.get("text", ""))
+                            if not text or not text.strip():
+                                continue
+                            try:
+                                start = float(word["start"]) + chunk.start_offset
+                                end = float(word["end"]) + chunk.start_offset
+                            except Exception:
+                                continue
+                            adjusted_words.append(
+                                {
+                                    "start": start,
+                                    "end": max(start, end),
+                                    "text": text,
+                                }
+                            )
+                        if adjusted_words:
+                            adjusted["words"] = adjusted_words
                     merged_segments.append(adjusted)
             elif cleaned_text:
                 merged_segments.append(
@@ -303,6 +339,86 @@ class TaskRunner:
             language=detected_language or detect_language_code(payload),
             raw_payload=payload,
         )
+
+    def _apply_intelligent_segmentation(
+        self,
+        result: TranscriptionResult,
+        cancel_event: Event,
+    ) -> TranscriptionResult:
+        if not self.settings.segmentation.enabled:
+            return result
+        if self.settings.transcription.timestamp_granularity != "word":
+            raise RuntimeError("智能分段仅支持词级时间戳输出，请先将时间戳粒度切换为 word")
+
+        provider = self._build_segmentation_provider()
+        if provider is None:
+            return result
+
+        words = collect_word_tokens(result.segments)
+        if not words:
+            raise RuntimeError(
+                "智能分段需要词级时间戳，但当前转写结果未包含 words 数据。"
+                "请确认所选服务端支持 `word` 时间戳输出。"
+            )
+
+        if cancel_event.is_set():
+            raise TaskCancelled("智能分段前已取消")
+
+        ranges = provider.segment_words(
+            words=words,
+            request=SegmentationRequest(
+                model=self.settings.segmentation.model,
+                source_language=result.language or detect_language_code(result.raw_payload),
+            ),
+            cancel_event=cancel_event,
+        )
+        rebuilt_segments = self._rebuild_segments_from_word_ranges(words, ranges)
+        if not rebuilt_segments:
+            raise RuntimeError("智能分段未生成可用的字幕段落")
+
+        updated_payload = dict(result.raw_payload)
+        updated_payload["segments"] = rebuilt_segments
+        updated_payload["text"] = "\n".join(
+            str(segment.get("text", "")).strip() for segment in rebuilt_segments if str(segment.get("text", "")).strip()
+        ).strip()
+        updated_payload["intelligent_segmentation"] = {
+            "enabled": True,
+            "model": self.settings.segmentation.model,
+            "word_count": len(words),
+            "segment_count": len(rebuilt_segments),
+        }
+
+        return TranscriptionResult(
+            text=updated_payload["text"],
+            segments=rebuilt_segments,
+            language=result.language or detect_language_code(updated_payload),
+            raw_payload=updated_payload,
+        )
+
+    def _rebuild_segments_from_word_ranges(
+        self,
+        words: list[dict[str, Any]],
+        ranges: list[tuple[int, int]],
+    ) -> list[dict[str, Any]]:
+        rebuilt_segments: list[dict[str, Any]] = []
+        for start_index, end_index in ranges:
+            bucket = words[start_index : end_index + 1]
+            if not bucket:
+                continue
+            segment_text = sanitize_transcribed_text(join_word_tokens(bucket))
+            if not segment_text:
+                segment_text = join_word_tokens(bucket)
+            if not segment_text:
+                continue
+            rebuilt_segments.append(
+                {
+                    "start": float(bucket[0]["start"]),
+                    "end": float(bucket[-1]["end"]),
+                    "text": segment_text,
+                    "words": [dict(word) for word in bucket],
+                }
+            )
+        return rebuilt_segments
 
     def _translate_transcription_result(
         self,
@@ -358,3 +474,6 @@ class TaskRunner:
             thinking_enabled=self.settings.translation.thinking_enabled,
             reasoning_effort=self.settings.translation.reasoning_effort,
         )
+
+    def _build_segmentation_provider(self):
+        return build_segmentation_provider(self.settings.segmentation)

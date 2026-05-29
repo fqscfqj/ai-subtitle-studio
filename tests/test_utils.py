@@ -58,6 +58,60 @@ class SanitizeTranscribedTextTests(unittest.TestCase):
         self.assertAlmostEqual(segments[0]["start"], 1.0, places=3)
         self.assertAlmostEqual(segments[0]["end"], 2.0, places=3)
 
+    def test_extract_segments_builds_synthetic_segment_from_top_level_words(self) -> None:
+        segments = extract_segments(
+            {
+                "text": "hello world",
+                "words": [
+                    {"start": 0.0, "end": 0.5, "word": "hello"},
+                    {"start": 0.5, "end": 1.0, "word": "world"},
+                ],
+            }
+        )
+
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0]["text"], "hello world")
+        self.assertEqual(len(segments[0]["words"]), 2)
+        self.assertAlmostEqual(segments[0]["start"], 0.0, places=3)
+        self.assertAlmostEqual(segments[0]["end"], 1.0, places=3)
+
+    def test_extract_segments_attaches_top_level_words_to_segments(self) -> None:
+        segments = extract_segments(
+            {
+                "segments": [
+                    {"start": 0.0, "end": 0.5, "text": "hello"},
+                    {"start": 0.5, "end": 1.0, "text": "world"},
+                ],
+                "words": [
+                    {"start": 0.0, "end": 0.4, "word": "hello"},
+                    {"start": 0.5, "end": 1.0, "word": "world"},
+                ],
+            }
+        )
+
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0]["words"][0]["text"], "hello")
+        self.assertEqual(segments[1]["words"][0]["text"], "world")
+
+    def test_extract_segments_normalizes_word_level_nanosecond_timestamps(self) -> None:
+        segments = extract_segments(
+            {
+                "text": "hello world",
+                "words": [
+                    {"start": 152000000.0, "end": 1000000152.0, "word": "hello"},
+                    {"start": 1000000152.0, "end": 2152000000.0, "word": "world"},
+                ],
+            }
+        )
+
+        self.assertEqual(len(segments), 1)
+        self.assertAlmostEqual(segments[0]["words"][0]["start"], 0.152, places=3)
+        self.assertAlmostEqual(segments[0]["words"][0]["end"], 1.0, places=3)
+        self.assertAlmostEqual(segments[0]["words"][1]["start"], 1.0, places=3)
+        self.assertAlmostEqual(segments[0]["words"][1]["end"], 2.152, places=3)
+        self.assertAlmostEqual(segments[0]["start"], 0.152, places=3)
+        self.assertAlmostEqual(segments[0]["end"], 2.152, places=3)
+
 
 if __name__ == "__main__":
     unittest.main()

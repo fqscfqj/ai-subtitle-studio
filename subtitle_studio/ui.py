@@ -472,6 +472,26 @@ class MainWindow(QMainWindow):
         self.timestamp_combo = NoWheelComboBox()
         self.timestamp_combo.addItems(["none", "segment", "word"])
         self.timestamp_combo.setCurrentText("segment")
+        self.timestamp_combo.currentIndexChanged.connect(self.on_timestamp_granularity_changed)
+        self.enable_segmentation_checkbox = QCheckBox("启用智能分段（仅 word 时间戳）")
+        self.enable_segmentation_checkbox.toggled.connect(self.on_intelligent_segmentation_changed)
+        self.segmentation_hint_label = QLabel("仅在时间戳粒度为 word 时生效；将调用专用 OpenAI 兼容 API 进行语义分段。")
+        self.segmentation_hint_label.setWordWrap(True)
+        self.segmentation_base_url_input = QLineEdit("https://api.openai.com/v1")
+        self.segmentation_model_input = QLineEdit("gpt-4o-mini")
+        self.segmentation_api_key_input = QLineEdit(os.environ.get("SEGMENTATION_OPENAI_API_KEY", ""))
+        self.segmentation_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.show_segmentation_key_checkbox = QCheckBox("显示")
+        self.show_segmentation_key_checkbox.toggled.connect(
+            lambda checked: self.segmentation_api_key_input.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+        )
+        self.segmentation_key_row = QWidget()
+        segmentation_key_layout = QHBoxLayout(self.segmentation_key_row)
+        segmentation_key_layout.setContentsMargins(0, 0, 0, 0)
+        segmentation_key_layout.addWidget(self.segmentation_api_key_input)
+        segmentation_key_layout.addWidget(self.show_segmentation_key_checkbox)
         self.diarize_checkbox = QCheckBox("启用说话人分离（仅 Mistral）")
         self.thread_spin = NoWheelSpinBox()
         self.thread_spin.setRange(1, 16)
@@ -491,6 +511,9 @@ class MainWindow(QMainWindow):
         self.language_mode_label = QLabel("语言模式")
         self.language_label = QLabel("指定语言")
         self.timestamp_label = QLabel("时间戳粒度")
+        self.segmentation_base_url_label = QLabel("智能分段 Base URL")
+        self.segmentation_api_key_label = QLabel("智能分段 API Key")
+        self.segmentation_model_label = QLabel("智能分段模型")
         self.thread_label = QLabel("任务线程数")
         self.context_bias_label = QLabel("术语提示")
 
@@ -516,11 +539,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.language_input, 9, 1)
         layout.addWidget(self.timestamp_label, 10, 0)
         layout.addWidget(self.timestamp_combo, 10, 1)
-        layout.addWidget(self.thread_label, 11, 0)
-        layout.addWidget(self.thread_spin, 11, 1)
-        layout.addWidget(self.context_bias_label, 12, 0)
-        layout.addWidget(self.context_bias_input, 12, 1)
-        layout.addWidget(self.diarize_checkbox, 13, 0, 1, 2)
+        layout.addWidget(self.enable_segmentation_checkbox, 11, 0, 1, 2)
+        layout.addWidget(self.segmentation_hint_label, 12, 0, 1, 2)
+        layout.addWidget(self.segmentation_base_url_label, 13, 0)
+        layout.addWidget(self.segmentation_base_url_input, 13, 1)
+        layout.addWidget(self.segmentation_api_key_label, 14, 0)
+        layout.addWidget(self.segmentation_key_row, 14, 1)
+        layout.addWidget(self.segmentation_model_label, 15, 0)
+        layout.addWidget(self.segmentation_model_input, 15, 1)
+        layout.addWidget(self.thread_label, 16, 0)
+        layout.addWidget(self.thread_spin, 16, 1)
+        layout.addWidget(self.context_bias_label, 17, 0)
+        layout.addWidget(self.context_bias_input, 17, 1)
+        layout.addWidget(self.diarize_checkbox, 18, 0, 1, 2)
 
         self.transcription_mistral_key_widgets = [
             self.mistral_api_key_label,
@@ -544,6 +575,14 @@ class MainWindow(QMainWindow):
             self.qwen3asr_key_row,
             self.qwen3asr_model_label,
             self.qwen3asr_model_combo,
+        ]
+        self.segmentation_config_widgets = [
+            self.segmentation_base_url_label,
+            self.segmentation_base_url_input,
+            self.segmentation_api_key_label,
+            self.segmentation_key_row,
+            self.segmentation_model_label,
+            self.segmentation_model_input,
         ]
         return group
 
@@ -801,6 +840,9 @@ class MainWindow(QMainWindow):
     def refresh_settings_visibility(self) -> None:
         self.on_language_mode_changed()
         self.on_translation_mode_changed()
+        self.on_transcription_provider_changed()
+        self.on_timestamp_granularity_changed()
+        self.on_intelligent_segmentation_changed()
         self.on_output_mode_changed()
         self.on_vad_enabled_changed()
 
@@ -942,6 +984,10 @@ class MainWindow(QMainWindow):
         self.language_mode_combo.setCurrentIndex(1 if settings.transcription.language_mode == "manual" else 0)
         self.language_input.setText(settings.transcription.language)
         self.timestamp_combo.setCurrentText(settings.transcription.timestamp_granularity)
+        self.enable_segmentation_checkbox.setChecked(settings.segmentation.enabled)
+        self.segmentation_base_url_input.setText(settings.segmentation.openai_base_url)
+        self.segmentation_api_key_input.setText(settings.segmentation.openai_api_key)
+        self.segmentation_model_input.setText(settings.segmentation.model)
         self.diarize_checkbox.setChecked(settings.transcription.diarize)
         self.thread_spin.setValue(settings.transcription.thread_count)
         self.context_bias_input.setPlainText(settings.transcription.context_bias)
@@ -987,6 +1033,11 @@ class MainWindow(QMainWindow):
         settings.transcription.diarize = self.diarize_checkbox.isChecked()
         settings.transcription.thread_count = self.thread_spin.value()
         settings.transcription.context_bias = parse_context_bias(self.context_bias_input.toPlainText())
+
+        settings.segmentation.enabled = self.enable_segmentation_checkbox.isChecked()
+        settings.segmentation.openai_base_url = self.segmentation_base_url_input.text().strip() or "https://api.openai.com/v1"
+        settings.segmentation.openai_api_key = self.segmentation_api_key_input.text().strip()
+        settings.segmentation.model = self.segmentation_model_input.text().strip() or "gpt-4o-mini"
 
         settings.translation.mode = self.translation_mode_combo.currentData()
         settings.translation.target_language = normalize_language_code(self.translation_target_input.text().strip())
@@ -1050,6 +1101,7 @@ class MainWindow(QMainWindow):
         self.diarize_checkbox.setEnabled(use_mistral)
         if not use_mistral:
             self.diarize_checkbox.setChecked(False)
+        self.on_intelligent_segmentation_changed()
 
     def on_translation_mode_changed(self) -> None:
         mode = self.translation_mode_combo.currentData()
@@ -1090,6 +1142,28 @@ class MainWindow(QMainWindow):
             self.language_input.setPlaceholderText("语言代码，例如 zh / en")
         else:
             self.language_input.setPlaceholderText("自动识别时无需填写")
+
+    def on_timestamp_granularity_changed(self) -> None:
+        self.on_intelligent_segmentation_changed()
+
+    def on_intelligent_segmentation_changed(self) -> None:
+        enabled = self.enable_segmentation_checkbox.isChecked()
+        provider = self.transcription_provider_combo.currentData()
+        timestamp_granularity = self.timestamp_combo.currentText().strip()
+        eligible = timestamp_granularity == "word" and provider != "qwen3asr"
+
+        if provider == "qwen3asr":
+            hint = "Qwen3 ASR 当前不支持词级时间戳，无法启用智能分段。"
+        elif timestamp_granularity != "word":
+            hint = "智能分段仅在时间戳粒度为 word 时生效。"
+        else:
+            hint = "启用后将调用专用 OpenAI 兼容 API 做语义分段，并以新分段继续翻译和写出。"
+
+        self.segmentation_hint_label.setText(hint)
+        self.enable_segmentation_checkbox.setToolTip(hint)
+        self._set_widgets_visible(self.segmentation_config_widgets, enabled)
+        for widget in self.segmentation_config_widgets:
+            widget.setEnabled(enabled and eligible)
 
     def on_output_mode_changed(self) -> None:
         custom = self.output_mode_combo.currentData() == "custom"
@@ -1258,6 +1332,8 @@ class MainWindow(QMainWindow):
         self.log(f"已启动 {count} 个任务，线程数：{settings.transcription.thread_count}")
         if has_media and settings.transcription.provider == "whisper_openai_compatible":
             self.log("转写后端：Whisper(OpenAI 兼容)")
+        if settings.segmentation.enabled:
+            self.log("智能分段：已启用（专用 OpenAI 兼容 API，仅 word 时间戳生效）")
         self.total_progress.setValue(0)
         self._update_summary()
 
@@ -1537,6 +1613,17 @@ class MainWindow(QMainWindow):
                 raise RuntimeError("Whisper 转写需要填写第三方/OpenAI 兼容 API Key")
             if not settings.transcription.whisper.model:
                 raise RuntimeError("Whisper 转写需要填写模型名称")
+        if settings.segmentation.enabled:
+            if settings.transcription.timestamp_granularity != "word":
+                raise RuntimeError("启用智能分段时，时间戳粒度必须为 word")
+            if settings.transcription.provider == "qwen3asr":
+                raise RuntimeError("Qwen3 ASR 当前不支持词级时间戳，无法使用智能分段")
+            if not settings.segmentation.openai_base_url:
+                raise RuntimeError("请填写智能分段专用 API 的 Base URL")
+            if not settings.segmentation.openai_api_key:
+                raise RuntimeError("请填写智能分段专用 API 的 API Key")
+            if not settings.segmentation.model:
+                raise RuntimeError("请填写智能分段模型名称")
         if not (settings.output.save_srt or settings.output.save_lrc or settings.output.save_txt or settings.output.save_json):
             raise RuntimeError("请至少选择一种输出格式")
         if settings.output.mode == "custom":

@@ -36,6 +36,10 @@ class SettingsCompatibilityTests(unittest.TestCase):
         settings = deserialize_settings(
             {
                 "transcription_provider": "whisper_openai_compatible",
+                "segmentation_enabled": True,
+                "segmentation_openai_base": "https://segment.example.com/v1",
+                "segmentation_openai_key": "segment-key",
+                "segmentation_model": "segment-model",
                 "ffmpeg_path": "C:/tools/ffmpeg.exe",
                 "vad_min_speech_ms": 320,
                 "vad_min_silence_ms": 520,
@@ -49,6 +53,10 @@ class SettingsCompatibilityTests(unittest.TestCase):
         self.assertIn("whisper_base_url", payload)
         self.assertIn("whisper_api_key", payload)
         self.assertIn("whisper_model", payload)
+        self.assertIn("segmentation_enabled", payload)
+        self.assertIn("segmentation_openai_base", payload)
+        self.assertIn("segmentation_openai_key", payload)
+        self.assertIn("segmentation_model", payload)
         self.assertIn("silero_vad_enabled", payload)
         self.assertIn("vad_min_speech_ms", payload)
         self.assertIn("vad_min_silence_ms", payload)
@@ -56,6 +64,10 @@ class SettingsCompatibilityTests(unittest.TestCase):
         self.assertIn("vad_max_segment_seconds", payload)
         self.assertIn("vad_threshold", payload)
         self.assertNotIn("ffmpeg_path", payload)
+        self.assertTrue(settings.segmentation.enabled)
+        self.assertEqual(settings.segmentation.openai_base_url, "https://segment.example.com/v1")
+        self.assertEqual(settings.segmentation.openai_api_key, "segment-key")
+        self.assertEqual(settings.segmentation.model, "segment-model")
         self.assertEqual(settings.vad.min_speech_ms, 320)
         self.assertEqual(settings.vad.min_silence_ms, 520)
         self.assertEqual(settings.vad.speech_pad_ms, 180)

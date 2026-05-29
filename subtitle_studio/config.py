@@ -12,6 +12,7 @@ from .models import (
     MistralProviderSettings,
     OutputSettings,
     Qwen3ASRProviderSettings,
+    SegmentationSettings,
     TranscriptionSettings,
     TranslationSettings,
     VadSettings,
@@ -69,6 +70,12 @@ def default_settings() -> AppSettings:
         ),
         translation=TranslationSettings(
             openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
+        ),
+        segmentation=SegmentationSettings(
+            enabled=False,
+            openai_base_url=os.environ.get("SEGMENTATION_OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            openai_api_key=os.environ.get("SEGMENTATION_OPENAI_API_KEY", ""),
+            model=os.environ.get("SEGMENTATION_MODEL", "gpt-4o-mini"),
         ),
         output=OutputSettings(
             output_dir=Path.cwd() / "subtitles",
@@ -152,6 +159,10 @@ def serialize_settings(settings: AppSettings) -> Dict[str, Any]:
         "translation_openai_key": settings.translation.openai_api_key,
         "translation_thinking_enabled": settings.translation.thinking_enabled,
         "translation_reasoning_effort": settings.translation.reasoning_effort,
+        "segmentation_enabled": settings.segmentation.enabled,
+        "segmentation_openai_base": settings.segmentation.openai_base_url,
+        "segmentation_openai_key": settings.segmentation.openai_api_key,
+        "segmentation_model": settings.segmentation.model,
         "output_mode": settings.output.mode,
         "output_dir": str(settings.output.output_dir),
         "save_srt": settings.output.save_srt,
@@ -260,6 +271,23 @@ def deserialize_settings(data: Dict[str, Any]) -> AppSettings:
     settings.translation.reasoning_effort = _safe_str(
         data.get("translation_reasoning_effort"),
         settings.translation.reasoning_effort,
+    )
+
+    settings.segmentation.enabled = _safe_bool(
+        data.get("segmentation_enabled"),
+        settings.segmentation.enabled,
+    )
+    settings.segmentation.openai_base_url = _safe_str(
+        data.get("segmentation_openai_base"),
+        settings.segmentation.openai_base_url,
+    )
+    settings.segmentation.openai_api_key = _safe_str(
+        data.get("segmentation_openai_key"),
+        settings.segmentation.openai_api_key,
+    )
+    settings.segmentation.model = _safe_str(
+        data.get("segmentation_model"),
+        settings.segmentation.model,
     )
 
     settings.output.mode = _safe_str(

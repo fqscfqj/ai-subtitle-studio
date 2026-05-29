@@ -12,6 +12,7 @@
   - `Whisper (OpenAI 兼容接口)`，可对接第三方服务
 - 可选本地 `Silero VAD` 预切分，减少长音频请求压力
 - 可配置语言模式、时间戳粒度、上下文提示词、线程数
+- 当转写结果包含词级时间戳时，可选用专用 `OpenAI 兼容 Chat API` 做智能分段
 - 翻译模式支持：
   - 不翻译
   - `Mistral API`
@@ -76,6 +77,15 @@ python main.py
 - 如果服务端不支持 `timestamp_granularities`，程序会自动降级重试
 - `diarize` 不适用于该后端
 
+## 智能分段（词级时间戳）
+
+- 在设置页勾选“智能分段”后，程序会要求时间戳粒度为 `word`
+- 智能分段会调用**独立配置**的 `OpenAI 兼容 Chat API`（单独的 `base_url`、`api_key`、`model`）
+- LLM 只负责返回词索引范围，最终字幕时间轴仍由本地词级时间戳重建，避免时间漂移
+- 智能分段结果会直接替换最终输出的 `segments`，后续翻译也会基于新分段继续执行
+- 如果上游转写服务没有返回词级 `words` 数据，任务会直接报错而不是静默回退
+- `Qwen3 ASR` 当前不支持词级时间戳，因此不能启用智能分段
+
 ## Silero VAD
 
 - 默认关闭
@@ -93,6 +103,9 @@ python main.py
 | --- | --- |
 | `MISTRAL_API_KEY` | Mistral 转写或翻译认证 |
 | `OPENAI_API_KEY` | Whisper/OpenAI 兼容接口认证 |
+| `SEGMENTATION_OPENAI_BASE_URL` | 智能分段专用 OpenAI 兼容接口地址 |
+| `SEGMENTATION_OPENAI_API_KEY` | 智能分段专用 API Key |
+| `SEGMENTATION_MODEL` | 智能分段默认模型名 |
 | `FFMPEG_BINARY` | 自定义 `ffmpeg` 可执行文件路径 |
 
 ## 打包 EXE
