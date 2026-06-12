@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Event
 from typing import Any, Callable, Dict, List, Optional, Protocol
+
+_log = logging.getLogger(__name__)
 
 from ..http_client import HttpClient
 from ..models import TranslationProvider, TranslationRequest
@@ -102,6 +105,12 @@ class OpenAICompatibleChatBackend(ChatCompletionBackend):
 class MistralChatBackend(ChatCompletionBackend):
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
+        self._client: Any = None
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            self._client = Mistral(api_key=self.api_key)
+        return self._client
 
     def complete(
         self,
@@ -117,7 +126,6 @@ class MistralChatBackend(ChatCompletionBackend):
             if _MISTRAL_IMPORT_ERROR is not None:
                 details = f"（导入错误：{type(_MISTRAL_IMPORT_ERROR).__name__}: {_MISTRAL_IMPORT_ERROR}）"
             raise RuntimeError(f"缺少依赖：mistralai{details}")
-        client = Mistral(api_key=self.api_key)
         request_kwargs: dict[str, Any] = {
             "model": model,
             "messages": [
@@ -131,7 +139,11 @@ class MistralChatBackend(ChatCompletionBackend):
             request_kwargs["reasoning_effort"] = "none"
             request_kwargs["temperature"] = max(0.0, float(temperature))
 
-        response = client.chat.complete(**request_kwargs)
+        try:
+            response = self._get_client().chat.complete(**request_kwargs)
+        except Exception as exc:
+            _log.error("Mistral 翻译 API 调用失败: %s", exc, exc_info=True)
+            raise RuntimeError(f"Mistral 翻译 API 调用失败: {type(exc).__name__}: {exc}") from exc
         payload = normalize_response(response)
         content = extract_chat_text(payload)
         if not content:
@@ -188,7 +200,7 @@ class StructuredSubtitleTranslationProvider(TranslationProvider):
         def translate_single_line(line: str) -> list[str]:
             last_content = ""
             last_error = ""
-            for attempt in range(1, max_attempts + 2):
+            for attempt in range(1, max_attempts + 1):
                 user_prompt = (
                     f"请把以下单条字幕翻译为 `{target_lang}`。"
                     "只返回 JSON 字符串数组，且长度必须为 1。"
@@ -209,7 +221,7 @@ class StructuredSubtitleTranslationProvider(TranslationProvider):
                     return [str(parsed[0]).strip()]
                 except Exception as exc:
                     last_error = str(exc).strip() or "未知错误"
-                    if attempt >= max_attempts + 1:
+                    if attempt >= max_attempts:
                         preview = last_content.strip().replace("\n", " ")
                         if len(preview) > 220:
                             preview = preview[:220] + "..."
@@ -218,7 +230,7 @@ class StructuredSubtitleTranslationProvider(TranslationProvider):
                         )
             raise RuntimeError("单条字幕翻译失败：未获得有效结果")
 
-        def translate_chunk(chunk: list[str]) -> list[str]:
+        def translate_chunk(chunk: list[str], _depth: int = 0) -> list[str]:
             if cancel_event.is_set():
                 raise RuntimeError("翻译前已取消")
 
@@ -255,14 +267,21 @@ class StructuredSubtitleTranslationProvider(TranslationProvider):
                     translated_chunk = translated
                     break
                 except Exception:
+                    _log.debug("翻译 chunk 第 %d 次尝试失败（depth=%d）", attempt, _depth, exc_info=True)
                     if attempt < max_attempts:
                         continue
 
             if translated_chunk is None:
                 if len(chunk) <= 1:
                     return translate_single_line(chunk[0] if chunk else "")
+                if _depth >= 5:
+                    _log.warning("翻译 chunk 二分回退达到最大深度 %d，剩余 %d 行将使用单条翻译", _depth, len(chunk))
+                    result: list[str] = []
+                    for line in chunk:
+                        result.extend(translate_single_line(line))
+                    return result
                 mid = max(1, len(chunk) // 2)
-                return translate_chunk(chunk[:mid]) + translate_chunk(chunk[mid:])
+                return translate_chunk(chunk[:mid], _depth + 1) + translate_chunk(chunk[mid:], _depth + 1)
             return translated_chunk
 
         if parallel_workers <= 1 or len(chunks) <= 1:

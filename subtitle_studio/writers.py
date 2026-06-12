@@ -76,7 +76,7 @@ def write_translation_outputs(
     write_lrc: bool = False,
 ) -> Dict[str, str]:
     outputs: Dict[str, str] = {}
-    target_lang_code = normalize_language_code(settings.translation.target_language) or "tr"
+    target_lang_code = normalize_language_code(settings.translation.target_language) or "und"
     trans_base = target_dir / f"{source_stem}.{target_lang_code}"
     orig_base = target_dir / f"{source_stem}.orig"
 
@@ -95,13 +95,16 @@ def write_translation_outputs(
     def avoid_overwrite(path: Path) -> Path:
         base_path = path
         attempt = 0
-        while True:
+        max_attempts = 100
+        while attempt < max_attempts:
             conflict_with_source = source_path is not None and same_path(path, source_path)
             if not conflict_with_source and not path.exists():
                 return path
             attempt += 1
             suffix = ".translated" if attempt == 1 else f".translated{attempt}"
             path = base_path.with_name(f"{base_path.stem}{suffix}{base_path.suffix}")
+        # Fallback: return the last generated path even if it overwrites
+        return path
 
     if settings.output.save_srt:
         trans_srt_path = avoid_overwrite(with_output_ext(trans_base, ".srt"))

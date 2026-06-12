@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,14 +26,18 @@ class VadSegment:
     end: float
 
 
+_vad_session_cache: SileroVadSession | None = None
+
+
 class SileroVadSession:
     def __init__(self, model_path: Optional[Path] = None) -> None:
         path = model_path or resource_path("assets/silero_vad.onnx")
         if not path.exists():
             raise RuntimeError(f"未找到 Silero VAD 模型: {path}")
         options = onnxruntime.SessionOptions()
-        options.inter_op_num_threads = 1
-        options.intra_op_num_threads = 1
+        num_threads = max(1, min(os.cpu_count() or 1, 4))
+        options.inter_op_num_threads = num_threads
+        options.intra_op_num_threads = num_threads
         self.session = onnxruntime.InferenceSession(
             str(path),
             providers=["CPUExecutionProvider"],
@@ -112,7 +117,10 @@ def detect_speech_segments(
     settings: VadSettings,
     progress_cb: Optional[Callable[[float], None]] = None,
 ) -> List[VadSegment]:
-    session = SileroVadSession()
+    global _vad_session_cache
+    if _vad_session_cache is None:
+        _vad_session_cache = SileroVadSession()
+    session = _vad_session_cache
     probabilities = _speech_probabilities(audio, session, progress_cb=progress_cb)
     threshold = settings.threshold or DEFAULT_VAD_THRESHOLD
     neg_threshold = max(threshold - 0.15, 0.01)
@@ -207,8 +215,12 @@ def detect_speech_segments(
         if idx != len(speeches) - 1:
             silence_duration = speeches[idx + 1]["start"] - speech["end"]
             if silence_duration < 2 * speech_pad_samples:
-                speech["end"] += silence_duration // 2
-                speeches[idx + 1]["start"] = max(0, speeches[idx + 1]["start"] - silence_duration // 2)
+                # Not enough silence for full padding on both sides; distribute evenly
+                # but cap to available silence to prevent overlaps
+                half = max(0, silence_duration // 2)
+                speech["end"] += min(half, silence_duration)
+                next_pad = min(speech_pad_samples, max(0, silence_duration - half))
+                speeches[idx + 1]["start"] = max(0, speeches[idx + 1]["start"] - next_pad)
             else:
                 speech["end"] = min(len(audio), speech["end"] + speech_pad_samples)
                 speeches[idx + 1]["start"] = max(0, speeches[idx + 1]["start"] - speech_pad_samples)

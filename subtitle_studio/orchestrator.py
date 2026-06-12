@@ -273,8 +273,8 @@ class TaskRunner:
 
             if result.segments:
                 for segment in result.segments:
-                    segment_text = sanitize_transcribed_text(str(segment.get("text", "")))
-                    if not segment_text:
+                    segment_text = str(segment.get("text", ""))
+                    if not segment_text.strip():
                         continue
                     adjusted = dict(segment)
                     adjusted["start"] = float(segment["start"]) + chunk.start_offset

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib
+import logging
 from pathlib import Path
 from threading import Event
 from typing import Any, Callable, Dict, Optional
+
+_log = logging.getLogger(__name__)
 
 from ..http_client import HttpClient
 from ..models import (
@@ -65,7 +68,7 @@ class MistralTranscriptionProvider(TranscriptionProvider):
         kwargs: Dict[str, Any] = {"model": self.settings.model}
         if request.timestamp_granularity != "none":
             kwargs["timestamp_granularities"] = [request.timestamp_granularity]
-        elif request.language_mode == "manual" and request.language:
+        if request.language_mode == "manual" and request.language:
             kwargs["language"] = request.language
         if request.diarize:
             kwargs["diarize"] = True
@@ -122,6 +125,7 @@ class WhisperOpenAICompatibleProvider(TranscriptionProvider):
         if response.status_code >= 400 and data.get("timestamp_granularities[]"):
             error_text = response.text.lower()
             if "timestamp" in error_text or "granularit" in error_text:
+                _log.warning("服务端不支持 timestamp_granularities，回退为无时间戳模式。原始错误: %s", response.text[:200])
                 fallback_data = self._build_form_data(request, include_timestamps=False)
                 response = self.http_client.post_multipart(endpoint, data=fallback_data, files=files, headers=headers)
 
@@ -162,6 +166,7 @@ class WhisperOpenAICompatibleProvider(TranscriptionProvider):
             ".m4a": "audio/mp4",
             ".aac": "audio/aac",
             ".flac": "audio/flac",
+            ".opus": "audio/opus",
             ".ogg": "audio/ogg",
         }.get(suffix, "application/octet-stream")
 
