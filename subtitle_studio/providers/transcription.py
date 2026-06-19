@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import logging
 from pathlib import Path
 from threading import Event
@@ -10,28 +9,12 @@ _log = logging.getLogger(__name__)
 
 from ..http_client import HttpClient
 from ..models import (
-    MistralProviderSettings,
     TranscriptionProvider,
     TranscriptionRequest,
     TranscriptionResult,
     WhisperProviderSettings,
 )
-from ..utils import detect_language_code, extract_segments, extract_text, normalize_response
-
-_MISTRAL_IMPORT_ERROR: Exception | None = None
-try:
-    import mistralai.client as mistralai_client
-
-    Mistral = getattr(mistralai_client, "Mistral", None)
-    if Mistral is None:
-        raise AttributeError("mistralai.client.Mistral is unavailable")
-except Exception:
-    try:
-        mistralai_module = importlib.import_module("mistralai")
-        Mistral = getattr(mistralai_module, "Mistral")
-    except Exception as exc:
-        Mistral = None
-        _MISTRAL_IMPORT_ERROR = exc
+from ..utils import detect_language_code, extract_segments, extract_text
 
 
 def normalize_audio_transcriptions_url(base_url: str) -> str:
@@ -44,51 +27,6 @@ def normalize_audio_transcriptions_url(base_url: str) -> str:
     if not url.endswith("/v1"):
         url = f"{url}/v1"
     return f"{url}/audio/transcriptions"
-
-
-class MistralTranscriptionProvider(TranscriptionProvider):
-    def __init__(self, settings: MistralProviderSettings) -> None:
-        self.settings = settings
-
-    def transcribe(
-        self,
-        request: TranscriptionRequest,
-        progress_cb: Optional[Callable[[str], None]],
-        cancel_event: Event,
-    ) -> TranscriptionResult:
-        if cancel_event.is_set():
-            raise RuntimeError("转写前已取消")
-        if Mistral is None:
-            details = ""
-            if _MISTRAL_IMPORT_ERROR is not None:
-                details = f"（导入错误：{type(_MISTRAL_IMPORT_ERROR).__name__}: {_MISTRAL_IMPORT_ERROR}）"
-            raise RuntimeError(f"缺少依赖：mistralai{details}")
-        client = Mistral(api_key=self.settings.api_key)
-
-        kwargs: Dict[str, Any] = {"model": self.settings.model}
-        if request.timestamp_granularity != "none":
-            kwargs["timestamp_granularities"] = [request.timestamp_granularity]
-        if request.language_mode == "manual" and request.language:
-            kwargs["language"] = request.language
-        if request.diarize:
-            kwargs["diarize"] = True
-        if request.context_bias:
-            kwargs["context_bias"] = request.context_bias
-
-        if progress_cb:
-            progress_cb("正在调用 Mistral API")
-        with request.audio_path.open("rb") as file_obj:
-            response = client.audio.transcriptions.complete(
-                file={"content": file_obj, "file_name": request.audio_path.name},
-                **kwargs,
-            )
-        payload = normalize_response(response)
-        return TranscriptionResult(
-            text=extract_text(payload),
-            segments=extract_segments(payload),
-            language=detect_language_code(payload),
-            raw_payload=payload,
-        )
 
 
 class WhisperOpenAICompatibleProvider(TranscriptionProvider):

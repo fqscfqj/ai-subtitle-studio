@@ -9,7 +9,6 @@ from typing import Any, Dict
 from .constants import SETTINGS_FILE
 from .models import (
     AppSettings,
-    MistralProviderSettings,
     OutputSettings,
     SegmentationSettings,
     TranscriptionSettings,
@@ -53,10 +52,6 @@ def find_ffmpeg() -> str:
 def default_settings() -> AppSettings:
     return AppSettings(
         transcription=TranscriptionSettings(
-            mistral=MistralProviderSettings(
-                api_key=os.environ.get("MISTRAL_API_KEY", ""),
-                model="voxtral-mini-latest",
-            ),
             whisper=WhisperProviderSettings(
                 base_url="https://api.openai.com/v1",
                 api_key=os.environ.get("OPENAI_API_KEY", ""),
@@ -132,15 +127,12 @@ def serialize_settings(settings: AppSettings) -> Dict[str, Any]:
         "ui_theme": settings.ui_theme,
         "task_retry_base_delay": settings.retry_base_delay,
         "transcription_provider": settings.transcription.provider,
-        "api_key": settings.transcription.mistral.api_key,
-        "model": settings.transcription.mistral.model,
         "whisper_base_url": settings.transcription.whisper.base_url,
         "whisper_api_key": settings.transcription.whisper.api_key,
         "whisper_model": settings.transcription.whisper.model,
         "language_mode": settings.transcription.language_mode,
         "language": settings.transcription.language,
         "timestamp": settings.transcription.timestamp_granularity,
-        "diarize": settings.transcription.diarize,
         "context_bias": settings.transcription.context_bias,
         "thread_count": settings.transcription.thread_count,
         "task_max_retries": settings.transcription.max_retries,
@@ -196,8 +188,10 @@ def deserialize_settings(data: Dict[str, Any]) -> AppSettings:
         data.get("transcription_provider", data.get("provider", settings.transcription.provider)),
         settings.transcription.provider,
     )
-    settings.transcription.mistral.api_key = _safe_str(data.get("api_key"), settings.transcription.mistral.api_key)
-    settings.transcription.mistral.model = _safe_str(data.get("model"), settings.transcription.mistral.model)
+    # Backward compatibility: map old "mistral" provider to whisper
+    if settings.transcription.provider == "mistral":
+        settings.transcription.provider = "whisper_openai_compatible"
+    # Ignore legacy Mistral fields without crashing
     settings.transcription.whisper.base_url = _safe_str(
         data.get("whisper_base_url"),
         settings.transcription.whisper.base_url,
@@ -219,7 +213,6 @@ def deserialize_settings(data: Dict[str, Any]) -> AppSettings:
         data.get("timestamp"),
         settings.transcription.timestamp_granularity,
     )
-    settings.transcription.diarize = _safe_bool(data.get("diarize"), settings.transcription.diarize)
     settings.transcription.context_bias = _safe_str(data.get("context_bias"), settings.transcription.context_bias)
     settings.transcription.thread_count = _safe_int(
         data.get("thread_count"),
@@ -235,13 +228,18 @@ def deserialize_settings(data: Dict[str, Any]) -> AppSettings:
     )
 
     translation_mode_index = _safe_int(data.get("translation_mode_index"), -1)
+    # Backward compatibility: old mapping was {0:"none",1:"mistral",2:"openai"}
+    _legacy_translation_map = {0: "none", 1: "openai", 2: "openai"}
     settings.translation.mode = _safe_str(
         data.get(
             "translation_mode",
-            {0: "none", 1: "mistral", 2: "openai"}.get(translation_mode_index, settings.translation.mode),
+            _legacy_translation_map.get(translation_mode_index, settings.translation.mode),
         ),
         settings.translation.mode,
     )
+    # Backward compatibility: map old "mistral" translation mode to openai
+    if settings.translation.mode == "mistral":
+        settings.translation.mode = "openai"
     settings.translation.target_language = _safe_str(
         data.get("translation_target"),
         settings.translation.target_language,

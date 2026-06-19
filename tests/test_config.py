@@ -26,8 +26,7 @@ class SettingsCompatibilityTests(unittest.TestCase):
                 "silero_vad_enabled": True,
             }
         )
-        self.assertEqual(settings.transcription.provider, "mistral")
-        self.assertEqual(settings.transcription.mistral.api_key, "m-key")
+        self.assertEqual(settings.transcription.provider, "whisper_openai_compatible")
         self.assertEqual(settings.transcription.language_mode, "manual")
         self.assertEqual(settings.translation.mode, "openai")
         self.assertTrue(settings.vad.enabled)

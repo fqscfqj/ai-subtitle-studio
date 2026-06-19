@@ -562,37 +562,9 @@ class MainWindow(QMainWindow):
             "先选择转写引擎，再填写该引擎真正需要的凭据和模型；无关项会自动收起。",
         )
 
-        self.transcription_provider_combo = NoWheelComboBox(panel)
-        self.transcription_provider_combo.addItem("Mistral", "mistral")
-        self.transcription_provider_combo.addItem("Whisper(OpenAI 兼容)", "whisper_openai_compatible")
-        self.transcription_provider_combo.currentIndexChanged.connect(self.on_transcription_provider_changed)
-
-        provider_card, provider_body = self._build_card(
-            "选择转写引擎",
-            "按后端能力挑选，Mistral 适合长音频与说话人分离，Whisper 兼容性强，Qwen3 ASR 更适合 DashScope 场景。",
-        )
-        provider_buttons, self.transcription_provider_buttons = self._build_choice_buttons(
-            self.transcription_provider_combo,
-            [
-                ("Mistral", "长音频友好 · 支持说话人分离", "mistral"),
-                ("Whisper", "OpenAI 兼容接口 · 接入灵活", "whisper_openai_compatible"),
-            ],
-        )
-        provider_body.addWidget(provider_buttons)
-        layout.addWidget(provider_card)
-
         credentials_card, credentials_body = self._build_card("引擎凭据与模型")
         credentials_grid = self._form_grid()
         credentials_body.addLayout(credentials_grid)
-
-        self.mistral_api_key_label = self._field_label("Mistral API Key")
-        self.mistral_key_row, self.mistral_api_key_input, self.show_mistral_key_checkbox = self._build_secret_row(
-            "MISTRAL_API_KEY"
-        )
-        self.mistral_model_label = self._field_label("Mistral 模型")
-        self.mistral_model_combo = NoWheelComboBox()
-        self.mistral_model_combo.setEditable(True)
-        self.mistral_model_combo.addItems(["voxtral-mini-latest", "voxtral-small-latest"])
 
         self.whisper_base_url_label = self._field_label("Whisper Base URL")
         self.whisper_base_url_input = QLineEdit("https://api.openai.com/v1")
@@ -603,19 +575,12 @@ class MainWindow(QMainWindow):
         self.whisper_model_label = self._field_label("Whisper 模型")
         self.whisper_model_input = QLineEdit("whisper-1")
 
-        self.diarize_checkbox = QCheckBox("启用说话人分离（仅 Mistral）")
-
-        credentials_grid.addWidget(self.mistral_api_key_label, 0, 0)
-        credentials_grid.addWidget(self.mistral_key_row, 0, 1)
-        credentials_grid.addWidget(self.mistral_model_label, 1, 0)
-        credentials_grid.addWidget(self.mistral_model_combo, 1, 1)
-        credentials_grid.addWidget(self.whisper_base_url_label, 2, 0)
-        credentials_grid.addWidget(self.whisper_base_url_input, 2, 1)
-        credentials_grid.addWidget(self.whisper_api_key_label, 3, 0)
-        credentials_grid.addWidget(self.whisper_key_row, 3, 1)
-        credentials_grid.addWidget(self.whisper_model_label, 4, 0)
-        credentials_grid.addWidget(self.whisper_model_input, 4, 1)
-        credentials_grid.addWidget(self.diarize_checkbox, 5, 0, 1, 2)
+        credentials_grid.addWidget(self.whisper_base_url_label, 0, 0)
+        credentials_grid.addWidget(self.whisper_base_url_input, 0, 1)
+        credentials_grid.addWidget(self.whisper_api_key_label, 1, 0)
+        credentials_grid.addWidget(self.whisper_key_row, 1, 1)
+        credentials_grid.addWidget(self.whisper_model_label, 2, 0)
+        credentials_grid.addWidget(self.whisper_model_input, 2, 1)
         layout.addWidget(credentials_card)
 
         advanced_card, advanced_body = self._build_card(
@@ -734,23 +699,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(segmentation_card)
         layout.addStretch(1)
 
-        self.transcription_mistral_key_widgets = [
-            self.mistral_api_key_label,
-            self.mistral_key_row,
-        ]
-        self.transcription_mistral_only_widgets = [
-            self.mistral_model_label,
-            self.mistral_model_combo,
-            self.diarize_checkbox,
-        ]
-        self.transcription_whisper_widgets = [
-            self.whisper_base_url_label,
-            self.whisper_base_url_input,
-            self.whisper_api_key_label,
-            self.whisper_key_row,
-            self.whisper_model_label,
-            self.whisper_model_input,
-        ]
         self.segmentation_config_widgets = [
             self.segmentation_base_url_label,
             self.segmentation_base_url_input,
@@ -776,7 +724,6 @@ class MainWindow(QMainWindow):
 
         self.translation_mode_combo = NoWheelComboBox(panel)
         self.translation_mode_combo.addItem("不翻译", "none")
-        self.translation_mode_combo.addItem("Mistral API 翻译", "mistral")
         self.translation_mode_combo.addItem("OpenAI 兼容 API 翻译", "openai")
         self.translation_mode_combo.currentIndexChanged.connect(self.on_translation_mode_changed)
 
@@ -785,7 +732,6 @@ class MainWindow(QMainWindow):
             self.translation_mode_combo,
             [
                 ("不翻译", "只输出转写结果", "none"),
-                ("Mistral", "复用转写页中的 Mistral Key", "mistral"),
                 ("OpenAI 兼容", "适配 DeepSeek / OpenAI / 自建兼容服务", "openai"),
             ],
         )
@@ -798,7 +744,7 @@ class MainWindow(QMainWindow):
         self.translation_target_label = self._field_label("目标语言")
         self.translation_target_input = QLineEdit("zh")
         self.translation_model_label = self._field_label("翻译模型")
-        self.translation_model_input = QLineEdit("mistral-small-latest")
+        self.translation_model_input = QLineEdit("gpt-4o-mini")
         self.subtitle_translation_thread_label = self._field_label("字幕翻译线程数")
         self.subtitle_translation_thread_spin = NoWheelSpinBox()
         self.subtitle_translation_thread_spin.setRange(1, 16)
@@ -861,9 +807,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.translation_reasoning_card)
 
         self.translation_access_card, access_body = self._build_card("接口接入")
-        self.translation_mistral_hint_label = QLabel("Mistral 翻译直接复用转写页中的 Mistral API Key，无需重复填写。")
-        self.translation_mistral_hint_label.setObjectName("mutedLabel")
-        self.translation_mistral_hint_label.setWordWrap(True)
         access_grid = self._form_grid()
         self.translation_openai_base_label = self._field_label("OpenAI 兼容 Base URL")
         self.translation_openai_base_input = QLineEdit("https://api.openai.com/v1")
@@ -875,7 +818,6 @@ class MainWindow(QMainWindow):
         access_grid.addWidget(self.translation_openai_base_input, 0, 1)
         access_grid.addWidget(self.translation_openai_key_label, 1, 0)
         access_grid.addWidget(self.translation_openai_key_row, 1, 1)
-        access_body.addWidget(self.translation_mistral_hint_label)
         access_body.addLayout(access_grid)
         layout.addWidget(self.translation_access_card)
         layout.addStretch(1)
@@ -886,7 +828,6 @@ class MainWindow(QMainWindow):
             self.translation_reasoning_card,
             self.translation_access_card,
         ]
-        self.translation_mistral_widgets = [self.translation_mistral_hint_label]
         self.translation_openai_widgets = [
             self.translation_openai_base_label,
             self.translation_openai_base_input,
@@ -1075,19 +1016,12 @@ class MainWindow(QMainWindow):
         theme_index = {"light": 0, "dark": 1}.get(settings.ui_theme, 0)
         self.theme_combo.setCurrentIndex(theme_index)
 
-        provider_index = {"mistral": 0, "whisper_openai_compatible": 1}.get(
-            settings.transcription.provider, 0
-        )
-        self.transcription_provider_combo.setCurrentIndex(provider_index)
-        self.mistral_api_key_input.setText(settings.transcription.mistral.api_key)
-        self.mistral_model_combo.setCurrentText(settings.transcription.mistral.model)
         self.whisper_base_url_input.setText(settings.transcription.whisper.base_url)
         self.whisper_api_key_input.setText(settings.transcription.whisper.api_key)
         self.whisper_model_input.setText(settings.transcription.whisper.model)
         self.language_mode_combo.setCurrentIndex(1 if settings.transcription.language_mode == "manual" else 0)
         self.language_input.setText(settings.transcription.language)
         self.timestamp_combo.setCurrentText(settings.transcription.timestamp_granularity)
-        self.diarize_checkbox.setChecked(settings.transcription.diarize)
         self.thread_spin.setValue(settings.transcription.thread_count)
         self.max_retries_spin.setValue(settings.transcription.max_retries)
         self.retry_base_delay_spin.setValue(settings.retry_base_delay)
@@ -1102,7 +1036,7 @@ class MainWindow(QMainWindow):
         self.segmentation_temperature_spin.setValue(settings.segmentation.temperature)
         self.segmentation_window_spin.setValue(settings.segmentation.max_words_per_window)
 
-        self.translation_mode_combo.setCurrentIndex({"none": 0, "mistral": 1, "openai": 2}.get(settings.translation.mode, 0))
+        self.translation_mode_combo.setCurrentIndex({"none": 0, "openai": 1}.get(settings.translation.mode, 0))
         self.translation_target_input.setText(settings.translation.target_language)
         self.translation_model_input.setText(settings.translation.model)
         self.translation_bilingual_checkbox.setChecked(settings.translation.bilingual_srt)
@@ -1135,16 +1069,13 @@ class MainWindow(QMainWindow):
         settings.ui_theme = self.theme_combo.currentData() or "light"
         settings.retry_base_delay = self.retry_base_delay_spin.value()
 
-        settings.transcription.provider = self.transcription_provider_combo.currentData()
-        settings.transcription.mistral.api_key = self.mistral_api_key_input.text().strip()
-        settings.transcription.mistral.model = self.mistral_model_combo.currentText().strip() or "voxtral-mini-latest"
+        settings.transcription.provider = "whisper_openai_compatible"
         settings.transcription.whisper.base_url = self.whisper_base_url_input.text().strip() or "https://api.openai.com/v1"
         settings.transcription.whisper.api_key = self.whisper_api_key_input.text().strip()
         settings.transcription.whisper.model = self.whisper_model_input.text().strip() or "whisper-1"
         settings.transcription.language_mode = "manual" if self.language_mode_combo.currentIndex() == 1 else "auto"
         settings.transcription.language = normalize_language_code(self.language_input.text().strip())
         settings.transcription.timestamp_granularity = self.timestamp_combo.currentText().strip() or "none"
-        settings.transcription.diarize = self.diarize_checkbox.isChecked()
         settings.transcription.thread_count = self.thread_spin.value()
         settings.transcription.max_retries = self.max_retries_spin.value()
         settings.transcription.context_bias = parse_context_bias(self.context_bias_input.toPlainText())
@@ -1200,31 +1131,6 @@ class MainWindow(QMainWindow):
         self.apply_style(self.theme_combo.currentData() or "light")
 
     def on_transcription_provider_changed(self) -> None:
-        if not hasattr(self, "transcription_provider_buttons"):
-            return
-        provider = self.transcription_provider_combo.currentData()
-        translation_mode = self.translation_mode_combo.currentData() if hasattr(self, "translation_mode_combo") else "none"
-        use_mistral = provider == "mistral"
-        use_whisper = provider == "whisper_openai_compatible"
-        show_mistral_key = use_mistral or translation_mode == "mistral"
-
-        self._sync_choice_buttons(self.transcription_provider_combo, self.transcription_provider_buttons)
-        if not hasattr(self, "transcription_mistral_key_widgets"):
-            return
-        self._set_widgets_visible(self.transcription_mistral_key_widgets, show_mistral_key)
-        self._set_widgets_visible(self.transcription_mistral_only_widgets, use_mistral)
-        self._set_widgets_visible(self.transcription_whisper_widgets, use_whisper)
-
-        self.mistral_api_key_input.setEnabled(show_mistral_key)
-        self.show_mistral_key_checkbox.setEnabled(show_mistral_key)
-        self.mistral_model_combo.setEnabled(use_mistral)
-        self.whisper_base_url_input.setEnabled(use_whisper)
-        self.whisper_api_key_input.setEnabled(use_whisper)
-        self.show_whisper_key_checkbox.setEnabled(use_whisper)
-        self.whisper_model_input.setEnabled(use_whisper)
-        self.diarize_checkbox.setEnabled(use_mistral)
-        if not use_mistral:
-            self.diarize_checkbox.setChecked(False)
         self.on_intelligent_segmentation_changed()
 
     def on_translation_mode_changed(self) -> None:
@@ -1232,15 +1138,12 @@ class MainWindow(QMainWindow):
             return
         mode = self.translation_mode_combo.currentData()
         enable_translation = mode != "none"
-        use_mistral = mode == "mistral"
         use_openai = mode == "openai"
-        current_model = self.translation_model_input.text().strip() if hasattr(self, "translation_model_input") else ""
 
         self._sync_choice_buttons(self.translation_mode_combo, self.translation_mode_buttons)
         if not hasattr(self, "translation_common_cards"):
             return
         self._set_widgets_visible(self.translation_common_cards, enable_translation)
-        self._set_widgets_visible(self.translation_mistral_widgets, use_mistral)
         self._set_widgets_visible(self.translation_openai_widgets, use_openai)
 
         self.translation_target_input.setEnabled(enable_translation)
@@ -1254,10 +1157,6 @@ class MainWindow(QMainWindow):
         self.translation_openai_key_input.setEnabled(use_openai)
         self.show_translation_openai_key_checkbox.setEnabled(use_openai)
 
-        if mode == "mistral" and current_model in {"", "gpt-4o-mini"}:
-            self.translation_model_input.setText("mistral-small-latest")
-        if mode == "openai" and current_model in {"", "mistral-small-latest"}:
-            self.translation_model_input.setText("gpt-4o-mini")
         self.on_translation_thinking_changed()
         self.on_transcription_provider_changed()
 
@@ -1475,12 +1374,6 @@ class MainWindow(QMainWindow):
         if has_subtitle and not settings.translation.allow_subtitle_import:
             QMessageBox.warning(self, "字幕导入已关闭", "请在设置中开启“允许导入字幕文件并翻译”")
             return
-        if (
-            settings.transcription.provider == "mistral"
-            and settings.transcription.timestamp_granularity != "none"
-            and settings.transcription.language_mode == "manual"
-        ):
-            self.log("Mistral 启用时间戳粒度后，language 参数将被忽略")
 
         count = self.qm.start_batch(settings)
         if count == 0:
@@ -1752,12 +1645,6 @@ class MainWindow(QMainWindow):
             if not is_valid_http_url(settings.translation.openai_base_url):
                 raise RuntimeError("OpenAI 兼容翻译模式的 Base URL 无效，请填写 http/https 地址")
 
-        if settings.translation.mode == "mistral" and not settings.transcription.mistral.api_key:
-            raise RuntimeError("Mistral 翻译模式需要填写 MISTRAL_API_KEY")
-
-        if settings.transcription.provider == "mistral" and not settings.transcription.mistral.api_key:
-            raise RuntimeError("Mistral 转写需要填写 MISTRAL_API_KEY")
-
         if settings.transcription.provider == "whisper_openai_compatible":
             if not settings.transcription.whisper.api_key:
                 raise RuntimeError("Whisper 转写需要填写第三方/OpenAI 兼容 API Key")
@@ -1786,20 +1673,5 @@ class MainWindow(QMainWindow):
                 settings.output.output_dir.mkdir(parents=True, exist_ok=True)
             except Exception as exc:
                 raise RuntimeError(f"输出目录不可用：{exc}") from exc
-
-        if settings.transcription.provider == "mistral" and transcription_provider.Mistral is None:
-            details = ""
-            if transcription_provider._MISTRAL_IMPORT_ERROR is not None:
-                details = (
-                    f"（导入错误：{type(transcription_provider._MISTRAL_IMPORT_ERROR).__name__}: "
-                    f"{transcription_provider._MISTRAL_IMPORT_ERROR}）"
-                )
-            raise RuntimeError(f"缺少依赖：mistralai{details}")
-
-        model_name = settings.translation.model.lower().strip()
-        if settings.translation.mode == "mistral" and model_name.startswith(("gpt", "o1", "deepseek", "qwen")):
-            self.log("提示：当前翻译模式为 Mistral，但模型名看起来更像 OpenAI 兼容模型，请确认接口选择无误。")
-        if settings.translation.mode == "openai" and model_name.startswith("mistral"):
-            self.log("提示：当前翻译模式为 OpenAI 兼容，但模型名看起来像 Mistral 模型，请确认接口选择无误。")
 
         return settings

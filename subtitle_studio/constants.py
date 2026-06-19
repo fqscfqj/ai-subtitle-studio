@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 SETTINGS_FILE = ".ai_subtitle_studio_settings.json"
-MAX_MISTRAL_CHUNK_DURATION_SECONDS = 3 * 3600
 DEFAULT_VAD_MAX_SEGMENT_SECONDS = 15 * 60
 DEFAULT_VAD_THRESHOLD = 0.5
 DEFAULT_VAD_MIN_SPEECH_MS = 250

@@ -6,13 +6,11 @@ from threading import Event
 from typing import Any, Callable, Dict, List, Optional
 
 from .config import find_ffmpeg
-from .constants import MAX_MISTRAL_CHUNK_DURATION_SECONDS, SUBTITLE_EXTENSIONS
+from .constants import SUBTITLE_EXTENSIONS
 from .media import (
     AudioChunk,
     cleanup_paths,
-    get_audio_duration_seconds,
     prepare_audio_source,
-    split_audio_into_chunks,
     split_audio_with_vad,
 )
 from .models import (
@@ -25,7 +23,6 @@ from .models import (
 )
 from .providers.segmentation import build_segmentation_provider
 from .providers.transcription import (
-    MistralTranscriptionProvider,
     WhisperOpenAICompatibleProvider,
     summarize_empty_transcription_response,
 )
@@ -92,19 +89,6 @@ class TaskRunner:
                 cleanup.append(temp_dir)
                 chunks = split_audio_with_vad(prepared.audio_path, self.settings.vad, temp_dir)
                 report("Transcribing", 55, f"VAD 已切分为 {len(chunks)} 段")
-            elif self.settings.transcription.provider == "mistral" and ffmpeg_path:
-                duration = get_audio_duration_seconds(ffmpeg_path, prepared.audio_path)
-                if duration > MAX_MISTRAL_CHUNK_DURATION_SECONDS:
-                    temp_dir = Path(tempfile.mkdtemp(prefix="subtitle_chunks_"))
-                    cleanup.append(temp_dir)
-                    chunks = split_audio_into_chunks(
-                        ffmpeg_path=ffmpeg_path,
-                        audio_path=prepared.audio_path,
-                        chunk_duration=MAX_MISTRAL_CHUNK_DURATION_SECONDS,
-                        temp_dir=temp_dir,
-                        total_seconds=duration,
-                    )
-                    report("Transcribing", 50, f"音频过长，自动拆分为 {len(chunks)} 段")
 
             result = self._run_transcription_chunks(source_path, provider, chunks, report, cancel_event)
             if self.settings.segmentation.enabled:
@@ -233,7 +217,7 @@ class TaskRunner:
     def _run_transcription_chunks(
         self,
         source_path: Path,
-        provider: MistralTranscriptionProvider | WhisperOpenAICompatibleProvider,
+        provider: WhisperOpenAICompatibleProvider,
         chunks: List[AudioChunk],
         report: Callable[[str, int, str], None],
         cancel_event: Event,
@@ -256,7 +240,6 @@ class TaskRunner:
                     language_mode=self.settings.transcription.language_mode,
                     language=self.settings.transcription.language,
                     timestamp_granularity=self.settings.transcription.timestamp_granularity,
-                    diarize=self.settings.transcription.diarize and self.settings.transcription.provider == "mistral",
                     context_bias=self.settings.transcription.context_bias,
                 ),
                 progress_cb=None,
@@ -459,15 +442,12 @@ class TaskRunner:
 
     def _build_transcription_provider(
         self,
-    ) -> MistralTranscriptionProvider | WhisperOpenAICompatibleProvider:
-        if self.settings.transcription.provider == "whisper_openai_compatible":
-            return WhisperOpenAICompatibleProvider(self.settings.transcription.whisper)
-        return MistralTranscriptionProvider(self.settings.transcription.mistral)
+    ) -> WhisperOpenAICompatibleProvider:
+        return WhisperOpenAICompatibleProvider(self.settings.transcription.whisper)
 
     def _build_translation_provider(self):
         return build_translation_provider(
             mode=self.settings.translation.mode,
-            mistral_api_key=self.settings.transcription.mistral.api_key,
             openai_base_url=self.settings.translation.openai_base_url,
             openai_api_key=self.settings.translation.openai_api_key,
             thinking_enabled=self.settings.translation.thinking_enabled,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -11,22 +10,7 @@ _log = logging.getLogger(__name__)
 
 from ..http_client import HttpClient
 from ..models import TranslationProvider, TranslationRequest
-from ..utils import extract_chat_text, is_chinese_language, normalize_response, parse_json_array_output
-
-_MISTRAL_IMPORT_ERROR: Exception | None = None
-try:
-    import mistralai.client as mistralai_client
-
-    Mistral = getattr(mistralai_client, "Mistral", None)
-    if Mistral is None:
-        raise AttributeError("mistralai.client.Mistral is unavailable")
-except Exception:
-    try:
-        mistralai_module = importlib.import_module("mistralai")
-        Mistral = getattr(mistralai_module, "Mistral")
-    except Exception as exc:
-        Mistral = None
-        _MISTRAL_IMPORT_ERROR = exc
+from ..utils import extract_chat_text, is_chinese_language, parse_json_array_output
 
 
 def normalize_chat_completions_url(base_url: str) -> str:
@@ -99,55 +83,6 @@ class OpenAICompatibleChatBackend(ChatCompletionBackend):
         content = extract_chat_text(payload)
         if not content:
             raise RuntimeError("OpenAI 兼容接口未返回可用文本")
-        return content
-
-
-class MistralChatBackend(ChatCompletionBackend):
-    def __init__(self, api_key: str) -> None:
-        self.api_key = api_key
-        self._client: Any = None
-
-    def _get_client(self) -> Any:
-        if self._client is None:
-            self._client = Mistral(api_key=self.api_key)
-        return self._client
-
-    def complete(
-        self,
-        model: str,
-        system_prompt: str,
-        user_prompt: str,
-        thinking_enabled: bool = False,
-        reasoning_effort: str = "high",
-        temperature: float = 0.2,
-    ) -> str:
-        if Mistral is None:
-            details = ""
-            if _MISTRAL_IMPORT_ERROR is not None:
-                details = f"（导入错误：{type(_MISTRAL_IMPORT_ERROR).__name__}: {_MISTRAL_IMPORT_ERROR}）"
-            raise RuntimeError(f"缺少依赖：mistralai{details}")
-        request_kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
-        if thinking_enabled:
-            request_kwargs["reasoning_effort"] = reasoning_effort
-        else:
-            request_kwargs["reasoning_effort"] = "none"
-            request_kwargs["temperature"] = max(0.0, float(temperature))
-
-        try:
-            response = self._get_client().chat.complete(**request_kwargs)
-        except Exception as exc:
-            _log.error("Mistral 翻译 API 调用失败: %s", exc, exc_info=True)
-            raise RuntimeError(f"Mistral 翻译 API 调用失败: {type(exc).__name__}: {exc}") from exc
-        payload = normalize_response(response)
-        content = extract_chat_text(payload)
-        if not content:
-            raise RuntimeError("Mistral 翻译接口未返回可用文本")
         return content
 
 
@@ -305,7 +240,6 @@ class StructuredSubtitleTranslationProvider(TranslationProvider):
 
 def build_translation_provider(
     mode: str,
-    mistral_api_key: str,
     openai_base_url: str,
     openai_api_key: str,
     thinking_enabled: bool = False,
@@ -315,14 +249,6 @@ def build_translation_provider(
 ) -> TranslationProvider | None:
     if mode == "none":
         return None
-    if mode == "mistral":
-        return StructuredSubtitleTranslationProvider(
-            MistralChatBackend(mistral_api_key),
-            thinking_enabled=thinking_enabled,
-            reasoning_effort=reasoning_effort,
-            temperature=temperature,
-            chunk_size=chunk_size,
-        )
     if mode == "openai":
         return StructuredSubtitleTranslationProvider(
             OpenAICompatibleChatBackend(openai_base_url, openai_api_key),

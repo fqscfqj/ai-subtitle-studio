@@ -16,12 +16,6 @@ class TaskCancelled(Exception):
 
 
 @dataclass
-class MistralProviderSettings:
-    api_key: str = ""
-    model: str = "voxtral-mini-latest"
-
-
-@dataclass
 class WhisperProviderSettings:
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
@@ -30,22 +24,20 @@ class WhisperProviderSettings:
 
 @dataclass
 class TranscriptionSettings:
-    provider: str = "mistral"
+    provider: str = "whisper_openai_compatible"
     language_mode: str = "auto"
     language: str = ""
     timestamp_granularity: str = "segment"
-    diarize: bool = False
     context_bias: str = ""
     thread_count: int = 3
     max_retries: int = 3
-    mistral: MistralProviderSettings = field(default_factory=MistralProviderSettings)
     whisper: WhisperProviderSettings = field(default_factory=WhisperProviderSettings)
 
 
 @dataclass
 class TranslationSettings:
     mode: str = "none"
-    model: str = "mistral-small-latest"
+    model: str = "gpt-4o-mini"
     target_language: str = "zh"
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
@@ -124,7 +116,6 @@ class TranscriptionRequest:
     language_mode: str
     language: str
     timestamp_granularity: str
-    diarize: bool
     context_bias: str
 
 
