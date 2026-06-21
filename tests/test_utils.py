@@ -27,7 +27,7 @@ class SanitizeTranscribedTextTests(unittest.TestCase):
                 self.assertEqual(sanitize_transcribed_text(raw), "")
 
     def test_filters_hallucination_artifacts(self) -> None:
-        for raw in ("parakeet Й", "parakeet П", "parakeet!!!"):
+        for raw in ("parakeet Й", "parakeet П", "长尾鹦鹉 Й", "长尾鹦鹉 П", "长尾鹦鹉 Й P", "parakeet Й P"):
             with self.subTest(raw=raw):
                 self.assertEqual(sanitize_transcribed_text(raw), "")
 

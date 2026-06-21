@@ -49,11 +49,8 @@ _COMMON_STAGE_DIRECTION_PHRASES = {
     "clears throat",
     "heavy breathing",
 }
-_HALLUCINATION_PATTERNS: list[re.Pattern[str]] = [
-    # "parakeet" followed by or mixed with non-Latin / garbage characters
-    re.compile(r"parakeet[\s\W]*[\u0400-\u04ff\u0370-\u03ff]", re.IGNORECASE),
-    re.compile(r"parakeet[^\w\s]{2,}", re.IGNORECASE),
-]
+_HALLUCINATION_KEYWORDS = ("parakeet", "长尾鹦鹉")
+_HALLUCINATION_NON_LATIN_RE = re.compile(r"[\u0400-\u04ff\u0370-\u03ff]")
 _COMMON_STAGE_DIRECTION_WORDS_ZH = {
     "叹气",
     "喘息",
@@ -292,7 +289,8 @@ def _is_balanced_non_speech_text(text: str) -> bool:
 
 
 def _is_hallucination_text(text: str) -> bool:
-    return any(pat.search(text) for pat in _HALLUCINATION_PATTERNS)
+    lower = text.casefold()
+    return any(kw in lower for kw in _HALLUCINATION_KEYWORDS) and bool(_HALLUCINATION_NON_LATIN_RE.search(text))
 
 
 def _is_stage_direction(text: str) -> bool:
