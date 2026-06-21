@@ -49,6 +49,11 @@ _COMMON_STAGE_DIRECTION_PHRASES = {
     "clears throat",
     "heavy breathing",
 }
+_HALLUCINATION_PATTERNS: list[re.Pattern[str]] = [
+    # "parakeet" followed by or mixed with non-Latin / garbage characters
+    re.compile(r"parakeet[\s\W]*[\u0400-\u04ff\u0370-\u03ff]", re.IGNORECASE),
+    re.compile(r"parakeet[^\w\s]{2,}", re.IGNORECASE),
+]
 _COMMON_STAGE_DIRECTION_WORDS_ZH = {
     "叹气",
     "喘息",
@@ -271,6 +276,8 @@ def sanitize_transcribed_text(value: str) -> str:
     text = stripped_dialogue
     if _is_balanced_non_speech_text(text):
         return ""
+    if _is_hallucination_text(text):
+        return ""
     if any(_is_meaningful_char(ch) for ch in text):
         return text
     return ""
@@ -282,6 +289,10 @@ def _is_balanced_non_speech_text(text: str) -> bool:
         or _is_number_or_bullet_fragment(text)
         or _is_filler_utterance(text)
     )
+
+
+def _is_hallucination_text(text: str) -> bool:
+    return any(pat.search(text) for pat in _HALLUCINATION_PATTERNS)
 
 
 def _is_stage_direction(text: str) -> bool:

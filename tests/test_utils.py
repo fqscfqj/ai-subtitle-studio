@@ -26,6 +26,14 @@ class SanitizeTranscribedTextTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertEqual(sanitize_transcribed_text(raw), "")
 
+    def test_filters_hallucination_artifacts(self) -> None:
+        for raw in ("parakeet Й", "parakeet П", "parakeet!!!"):
+            with self.subTest(raw=raw):
+                self.assertEqual(sanitize_transcribed_text(raw), "")
+
+    def test_keeps_parakeet_in_normal_context(self) -> None:
+        self.assertEqual(sanitize_transcribed_text("I saw a parakeet today."), "I saw a parakeet today.")
+
     def test_normalizes_dialogue_dash(self) -> None:
         self.assertEqual(sanitize_transcribed_text("- Yeah, it's the first time."), "Yeah, it's the first time.")
         self.assertEqual(sanitize_transcribed_text("- Meili."), "Meili.")
