@@ -120,6 +120,113 @@ class SanitizeTranscribedTextTests(unittest.TestCase):
         self.assertAlmostEqual(segments[0]["start"], 0.152, places=3)
         self.assertAlmostEqual(segments[0]["end"], 2.152, places=3)
 
+    def test_extract_segments_handles_nemo_start_time_end_time(self) -> None:
+        """NeMo / parakeet 后端返回 start_time/end_time（微秒整数）。"""
+        segments = extract_segments(
+            {
+                "text": "hello world",
+                "words": [
+                    {"start_time": 152000, "end_time": 500000, "word": "hello"},
+                    {"start_time": 500000, "end_time": 1000000, "word": "world"},
+                ],
+            }
+        )
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(len(segments[0]["words"]), 2)
+        self.assertAlmostEqual(segments[0]["words"][0]["start"], 0.152, places=3)
+        self.assertAlmostEqual(segments[0]["words"][0]["end"], 0.5, places=3)
+        self.assertAlmostEqual(segments[0]["words"][1]["start"], 0.5, places=3)
+        self.assertAlmostEqual(segments[0]["words"][1]["end"], 1.0, places=3)
+
+    def test_extract_segments_normalizes_microsecond_timestamps(self) -> None:
+        """start_time/end_time 微秒值通过 _extract_word_tokens 转换为秒。"""
+        segments = extract_segments(
+            {
+                "text": "hello world",
+                "words": [
+                    {"start_time": 152000, "end_time": 500000, "word": "hello"},
+                    {"start_time": 500000, "end_time": 1000000, "word": "world"},
+                ],
+            }
+        )
+        self.assertEqual(len(segments), 1)
+        self.assertAlmostEqual(segments[0]["words"][0]["start"], 0.152, places=3)
+        self.assertAlmostEqual(segments[0]["words"][0]["end"], 0.5, places=3)
+        self.assertAlmostEqual(segments[0]["words"][1]["start"], 0.5, places=3)
+        self.assertAlmostEqual(segments[0]["words"][1]["end"], 1.0, places=3)
+
+    def test_extract_segments_synthesizes_words_from_text_only_tokens(self) -> None:
+        """tokens 只有文本无时间戳时，从 segment 时间均匀插值生成 words。"""
+        segments = extract_segments(
+            {
+                "text": "Hello world",
+                "segments": [
+                    {
+                        "start": 0.0,
+                        "end": 1.0,
+                        "text": "Hello world",
+                        "tokens": [
+                            {"token": "Hello"},
+                            {"token": "world"},
+                        ],
+                    }
+                ],
+            }
+        )
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(len(segments[0]["words"]), 2)
+        self.assertAlmostEqual(segments[0]["words"][0]["start"], 0.0, places=3)
+        self.assertAlmostEqual(segments[0]["words"][0]["end"], 0.5, places=3)
+        self.assertEqual(segments[0]["words"][0]["text"], "Hello")
+        self.assertAlmostEqual(segments[0]["words"][1]["start"], 0.5, places=3)
+        self.assertAlmostEqual(segments[0]["words"][1]["end"], 1.0, places=3)
+        self.assertEqual(segments[0]["words"][1]["text"], "world")
+
+    def test_extract_segments_synthesizes_words_from_string_tokens(self) -> None:
+        """tokens 为纯字符串列表时也能合成 words。"""
+        segments = extract_segments(
+            {
+                "segments": [
+                    {
+                        "start": 0.0,
+                        "end": 0.6,
+                        "text": "Hi there",
+                        "tokens": ["Hi", "there"],
+                    }
+                ],
+            }
+        )
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(len(segments[0]["words"]), 2)
+        self.assertAlmostEqual(segments[0]["words"][0]["start"], 0.0, places=3)
+        self.assertAlmostEqual(segments[0]["words"][0]["end"], 0.3, places=3)
+        self.assertEqual(segments[0]["words"][0]["text"], "Hi")
+        self.assertAlmostEqual(segments[0]["words"][1]["start"], 0.3, places=3)
+        self.assertAlmostEqual(segments[0]["words"][1]["end"], 0.6, places=3)
+        self.assertEqual(segments[0]["words"][1]["text"], "there")
+
+    def test_extract_segments_synthesizes_words_from_text_when_tokens_are_ids(self) -> None:
+        """tokens 为 Whisper token ID（整数/None）时，回退到从 segment text 拆词。"""
+        segments = extract_segments(
+            {
+                "text": "Hello world",
+                "segments": [
+                    {
+                        "start": 0.0,
+                        "end": 1.0,
+                        "text": "Hello world",
+                        "tokens": [50364, 15339, 1002, 50464],
+                    }
+                ],
+            }
+        )
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(len(segments[0]["words"]), 2)
+        self.assertAlmostEqual(segments[0]["words"][0]["start"], 0.0, places=3)
+        self.assertAlmostEqual(segments[0]["words"][0]["end"], 0.5, places=3)
+        self.assertEqual(segments[0]["words"][0]["text"], "Hello")
+        self.assertEqual(segments[0]["words"][1]["text"], "world")
+
 
 if __name__ == "__main__":
     unittest.main()

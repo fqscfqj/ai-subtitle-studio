@@ -98,7 +98,7 @@ class SegmentationProviderTests(unittest.TestCase):
         self.assertEqual(payload["model"], "segment-model")
         self.assertIn("词序列", payload["messages"][1]["content"])
 
-    def test_segment_words_rejects_gapped_ranges(self) -> None:
+    def test_segment_words_fills_gapped_ranges(self) -> None:
         fake_client = FakeHttpClient('[{"start_index":0,"end_index":0},{"start_index":2,"end_index":2}]')
         provider = ChatCompletionSegmentationProvider(
             OpenAICompatibleSegmentationBackend(
@@ -109,18 +109,18 @@ class SegmentationProviderTests(unittest.TestCase):
             max_attempts=1,
         )
 
-        with self.assertRaises(RuntimeError) as ctx:
-            provider.segment_words(
-                words=[
-                    {"start": 0.0, "end": 0.2, "text": "hello"},
-                    {"start": 0.2, "end": 0.5, "text": "world"},
-                    {"start": 0.5, "end": 0.9, "text": "again"},
-                ],
-                request=SegmentationRequest(model="segment-model", source_language="en"),
-                cancel_event=Event(),
-            )
+        ranges = provider.segment_words(
+            words=[
+                {"start": 0.0, "end": 0.2, "text": "hello"},
+                {"start": 0.2, "end": 0.5, "text": "world"},
+                {"start": 0.5, "end": 0.9, "text": "again"},
+            ],
+            request=SegmentationRequest(model="segment-model", source_language="en"),
+            cancel_event=Event(),
+        )
 
-        self.assertIn("未完整覆盖", str(ctx.exception))
+        # gap at index 1 ("world") merged into first range
+        self.assertEqual(ranges, [(0, 2)])
 
     def test_segment_words_honors_cancel_event(self) -> None:
         fake_client = FakeHttpClient()

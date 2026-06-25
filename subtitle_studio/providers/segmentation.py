@@ -130,7 +130,7 @@ class ChatCompletionSegmentationProvider(SegmentationProvider):
             )
 
         _validate_segmentation_ranges(merged_ranges, len(normalized_words))
-        return merged_ranges
+        return _fill_gap_ranges(merged_ranges, len(normalized_words))
 
     def _segment_window(
         self,
@@ -161,7 +161,7 @@ class ChatCompletionSegmentationProvider(SegmentationProvider):
             try:
                 parsed = _parse_segmentation_ranges(content)
                 _validate_segmentation_ranges(parsed, len(window_words))
-                return parsed
+                return _fill_gap_ranges(parsed, len(window_words))
             except Exception as exc:
                 last_error = str(exc).strip() or "未知错误"
                 if attempt >= self.max_attempts:
@@ -318,17 +318,37 @@ def _validate_segmentation_ranges(ranges: list[tuple[int, int]], word_count: int
     if not ranges:
         raise RuntimeError("智能分段结果为空")
 
-    expected_start = 0
     for start, end in ranges:
         if start < 0 or end < 0:
             raise RuntimeError("智能分段索引不能为负数")
         if start > end:
             raise RuntimeError("智能分段起止索引非法")
-        if start != expected_start:
-            raise RuntimeError("智能分段结果未完整覆盖全部词索引")
+
+
+def _fill_gap_ranges(ranges: list[tuple[int, int]], word_count: int) -> list[tuple[int, int]]:
+    """将 AI 返回的可能有缝隙的分段填补为连续覆盖。"""
+    if not ranges:
+        return ranges
+
+    filled: list[tuple[int, int]] = []
+    expected_start = 0
+    for start, end in ranges:
+        if start > expected_start:
+            # 将缺口并入前一段
+            if filled:
+                prev_start, _ = filled[-1]
+                filled[-1] = (prev_start, end)
+            else:
+                filled.append((expected_start, end))
+        else:
+            filled.append((start, end))
         expected_start = end + 1
-    if expected_start != word_count:
-        raise RuntimeError("智能分段结果未完整覆盖全部词索引")
+
+    if expected_start < word_count:
+        prev_start, _ = filled[-1]
+        filled[-1] = (prev_start, word_count - 1)
+
+    return filled
 
 
 def _load_json_candidate(raw_text: str) -> Any:

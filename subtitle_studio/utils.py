@@ -164,6 +164,49 @@ def extract_text(payload: Dict[str, Any]) -> str:
     return ""
 
 
+def _synthesize_words_from_tokens(
+    raw_tokens: Any,
+    seg_start: float,
+    seg_end: float,
+    seg_text: str = "",
+) -> tuple[List[Dict[str, Any]], List[tuple[float, float]]]:
+    """当 tokens 存在但不含时间戳时，从文本 token 列表中提取文本并均匀插值时间。
+    若 tokens 为纯 ID（整数/None），则回退到从 seg_text 拆词。
+    """
+    texts: List[str] = []
+    if isinstance(raw_tokens, list):
+        for item in raw_tokens:
+            if isinstance(item, str):
+                token_str = item.strip()
+                if token_str:
+                    texts.append(token_str)
+                continue
+            if not isinstance(item, dict):
+                continue
+            for key in ("token", "text", "word", "value"):
+                val = item.get(key)
+                if isinstance(val, str) and val.strip():
+                    texts.append(val.strip())
+                    break
+
+    if not texts and seg_text.strip():
+        texts = re.findall(r"\S+", seg_text.strip())
+    if not texts:
+        return [], []
+
+    n = len(texts)
+    duration = max(seg_end - seg_start, 1e-6)
+    step = duration / n
+    words: List[Dict[str, Any]] = []
+    raw_pairs: List[tuple[float, float]] = []
+    for i, token_text in enumerate(texts):
+        w_start = seg_start + i * step
+        w_end = seg_start + (i + 1) * step
+        words.append({"start": w_start, "end": w_end, "text": token_text})
+        raw_pairs.append((w_start, w_end))
+    return words, raw_pairs
+
+
 def extract_segments(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     raw = payload.get("segments")
     top_level_words, top_level_word_pairs = _extract_word_tokens(payload.get("words"))
@@ -187,6 +230,13 @@ def extract_segments(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
                 end = segment_word_pairs[-1][1]
             if start is None or end is None:
                 continue
+
+            # 当 tokens 存在但无时间戳时，从 segment 时间均匀插值
+            if not segment_words:
+                segment_words, segment_word_pairs = _synthesize_words_from_tokens(
+                    item.get("tokens"), float(start), float(end),
+                    str(item.get("text") or ""),
+                )
 
             text = item.get("text")
             cleaned_text = sanitize_transcribed_text(str(text or ""))
@@ -398,6 +448,13 @@ def _extract_word_tokens(raw: Any) -> tuple[List[Dict[str, Any]], List[tuple[flo
             continue
         start = _coerce_timestamp(item.get("start"))
         end = _coerce_timestamp(item.get("end"))
+        # NeMo / parakeet 等后端用 start_time/end_time（微秒整数）
+        if start is None or end is None:
+            alt_start = _coerce_timestamp(item.get("start_time"))
+            alt_end = _coerce_timestamp(item.get("end_time"))
+            if alt_start is not None and alt_end is not None:
+                start = alt_start / 1_000_000.0
+                end = alt_end / 1_000_000.0
         if start is None or end is None:
             continue
 
@@ -490,12 +547,12 @@ def _normalize_timeline_items(
     if not raw_pairs:
         return
 
-    large_threshold = 10_000_000.0
-    if not any(abs(start) >= large_threshold or abs(end) >= large_threshold for start, end in raw_pairs):
+    ns_threshold = 10_000_000.0
+    if not any(abs(s) >= ns_threshold or abs(e) >= ns_threshold for s, e in raw_pairs):
         return
 
     def _to_seconds(value: float) -> float:
-        if abs(value) >= large_threshold:
+        if abs(value) >= ns_threshold:
             return value / 1_000_000_000.0
         return value
 
@@ -506,7 +563,7 @@ def _normalize_timeline_items(
 
         if start < prev_end:
             start = prev_end
-        if end < start and abs(raw_end) >= large_threshold:
+        if end < start and abs(raw_end) >= ns_threshold:
             end = start + max(0.0, float(_to_seconds(raw_end)))
         if end < start:
             end = start

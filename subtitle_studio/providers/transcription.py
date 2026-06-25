@@ -74,6 +74,21 @@ class WhisperOpenAICompatibleProvider(TranscriptionProvider):
         payload = response.payload if isinstance(response.payload, dict) else {"text": response.text}
 
         segments = extract_segments(payload)
+        if request.timestamp_granularity == "word" and segments:
+            has_words = any(isinstance(s.get("words"), list) and s["words"] for s in segments)
+            if not has_words:
+                seg0 = payload["segments"][0] if payload.get("segments") and isinstance(payload["segments"][0], dict) else {}
+                tokens_val = seg0.get("tokens")
+                token_sample = None
+                if isinstance(tokens_val, list) and tokens_val:
+                    token_sample = tokens_val[0]
+                _log.warning(
+                    "请求了 word 级时间戳但响应未提取到 words。"
+                    "响应顶层键: %s；segments[0] 键: %s；tokens[0] 样例: %s",
+                    sorted(payload.keys()) if isinstance(payload, dict) else "N/A",
+                    sorted(seg0.keys()) if seg0 else "N/A",
+                    token_sample,
+                )
         text = extract_text(payload)
         language = detect_language_code(payload)
         return TranscriptionResult(
